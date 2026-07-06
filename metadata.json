@@ -1,0 +1,6 @@
+{
+  "name": "BAlbums Premium Downloader",
+  "description": "Visualizador de álbuns e gerenciador de downloads em lote para BAlbums, Bunkr e outras mídias. Extraia e salve tudo em um único arquivo ZIP sem complicação.",
+  "requestFramePermissions": ["clipboard-read", "clipboard-write"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

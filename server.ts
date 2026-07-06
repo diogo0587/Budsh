@@ -1,0 +1,741 @@
+import express from 'express';
+import cors from 'cors';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import http from 'http';
+import https from 'https';
+import { GoogleGenAI, Type } from '@google/genai';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Initialize Gemini client if API key is present
+const ai = process.env.GEMINI_API_KEY
+  ? new GoogleGenAI({
+      apiKey: process.env.GEMINI_API_KEY,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        },
+      },
+    })
+  : null;
+
+async function startServer() {
+  const app = express();
+  const PORT = 3000;
+
+  app.use(cors());
+  app.use(express.json({ limit: '10mb' }));
+
+  // In-memory rich database of sample/trending albums to match balbums.st search behaviour offline
+  const DEFAULT_ALBUMS = [
+    {
+      id: 'juliana-reis-exclusive',
+      title: 'Juliana Reis - Private Photoshoot Session',
+      url: 'https://bunkr.si/a/juliana-reis-exclusive',
+      itemsCount: 10,
+      addedDate: 'Há 2 horas',
+      host: 'Bunkr.si',
+      tags: ['OnlyFans', 'Model', 'VIP', 'Juliana Reis'],
+      thumbnail: 'https://picsum.photos/id/1043/400/300',
+      files: [
+        { name: 'juliana_reis_photo_01.jpg', url: 'https://picsum.photos/id/1015/800/600', type: 'image' },
+        { name: 'juliana_reis_photo_02.jpg', url: 'https://picsum.photos/id/1016/800/600', type: 'image' },
+        { name: 'juliana_reis_photo_03.jpg', url: 'https://picsum.photos/id/1025/800/600', type: 'image' },
+        { name: 'juliana_reis_introduction.mp4', url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4', type: 'video' },
+        { name: 'juliana_reis_photo_04.jpg', url: 'https://picsum.photos/id/1035/800/600', type: 'image' },
+        { name: 'juliana_reis_photo_05.jpg', url: 'https://picsum.photos/id/1043/800/600', type: 'image' },
+        { name: 'juliana_reis_vlog_01.mp4', url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4', type: 'video' },
+        { name: 'juliana_reis_photo_06.jpg', url: 'https://picsum.photos/id/1062/800/600', type: 'image' },
+        { name: 'juliana_reis_photo_07.jpg', url: 'https://picsum.photos/id/1069/800/600', type: 'image' },
+        { name: 'juliana_reis_backstage.mp4', url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerFun.mp4', type: 'video' }
+      ]
+    },
+    {
+      id: 'mc-pipokinha-privado',
+      title: 'MC Pipokinha - Show Privado Backstage Pack',
+      url: 'https://bunkr.si/a/mc-pipokinha-privado',
+      itemsCount: 9,
+      addedDate: 'Há 5 horas',
+      host: 'Bunkr.si',
+      tags: ['Funk', 'Show', 'Brasil', 'MC Pipokinha', 'Vazados'],
+      thumbnail: 'https://picsum.photos/id/1025/400/300',
+      files: [
+        { name: 'mc_pipokinha_backstage_01.jpg', url: 'https://picsum.photos/id/1069/800/600', type: 'image' },
+        { name: 'mc_pipokinha_backstage_02.jpg', url: 'https://picsum.photos/id/1084/800/600', type: 'image' },
+        { name: 'mc_pipokinha_performance_clip.mp4', url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4', type: 'video' },
+        { name: 'mc_pipokinha_backstage_03.jpg', url: 'https://picsum.photos/id/111/800/600', type: 'image' },
+        { name: 'mc_pipokinha_backstage_04.jpg', url: 'https://picsum.photos/id/124/800/600', type: 'image' },
+        { name: 'mc_pipokinha_dance_rehearsal.mp4', url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerMeltdowns.mp4', type: 'video' },
+        { name: 'mc_pipokinha_backstage_05.jpg', url: 'https://picsum.photos/id/1015/800/600', type: 'image' },
+        { name: 'mc_pipokinha_backstage_06.jpg', url: 'https://picsum.photos/id/1016/800/600', type: 'image' },
+        { name: 'mc_pipokinha_interview_leak.mp4', url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/SubaruOutbackOnStreetAndDirt.mp4', type: 'video' }
+      ]
+    },
+    {
+      id: 'amouranth-twitch-leak',
+      title: 'Amouranth - ASMR & Cosplay Session Exclusive',
+      url: 'https://pixeldrain.com/u/amouranth-twitch-leak',
+      itemsCount: 8,
+      addedDate: 'Ontem',
+      host: 'Pixeldrain',
+      tags: ['Twitch', 'ASMR', 'Cosplay', 'Amouranth', 'OnlyFans'],
+      thumbnail: 'https://picsum.photos/id/1015/400/300',
+      files: [
+        { name: 'amouranth_cosplay_01.jpg', url: 'https://picsum.photos/id/111/800/600', type: 'image' },
+        { name: 'amouranth_cosplay_02.jpg', url: 'https://picsum.photos/id/124/800/600', type: 'image' },
+        { name: 'amouranth_asmr_highlights.mp4', url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/Sintel.mp4', type: 'video' },
+        { name: 'amouranth_cosplay_03.jpg', url: 'https://picsum.photos/id/1015/800/600', type: 'image' },
+        { name: 'amouranth_cosplay_04.jpg', url: 'https://picsum.photos/id/1016/800/600', type: 'image' },
+        { name: 'amouranth_pool_stream_mic.mp4', url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4', type: 'video' },
+        { name: 'amouranth_cosplay_05.jpg', url: 'https://picsum.photos/id/1025/800/600', type: 'image' },
+        { name: 'amouranth_cosplay_06.jpg', url: 'https://picsum.photos/id/1035/800/600', type: 'image' }
+      ]
+    },
+    {
+      id: 'corinna-kopf-miami',
+      title: 'Corinna Kopf - Miami Beach Photoshoot Leaks',
+      url: 'https://cyberdrop.me/a/corinna-kopf-miami',
+      itemsCount: 8,
+      addedDate: 'Há 3 dias',
+      host: 'Cyberdrop',
+      tags: ['OnlyFans', 'Influencer', 'Vazados', 'Corinna Kopf', 'Miami'],
+      thumbnail: 'https://picsum.photos/id/1016/400/300',
+      files: [
+        { name: 'corinna_kopf_miami_01.jpg', url: 'https://picsum.photos/id/1035/800/600', type: 'image' },
+        { name: 'corinna_kopf_miami_02.jpg', url: 'https://picsum.photos/id/1043/800/600', type: 'image' },
+        { name: 'corinna_kopf_beach_walk.mp4', url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/WeAreGoingOnBullrun.mp4', type: 'video' },
+        { name: 'corinna_kopf_miami_03.jpg', url: 'https://picsum.photos/id/1062/800/600', type: 'image' },
+        { name: 'corinna_kopf_miami_04.jpg', url: 'https://picsum.photos/id/1069/800/600', type: 'image' },
+        { name: 'corinna_kopf_villa_tour.mp4', url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerFun.mp4', type: 'video' },
+        { name: 'corinna_kopf_miami_05.jpg', url: 'https://picsum.photos/id/1084/800/600', type: 'image' },
+        { name: 'corinna_kopf_miami_06.jpg', url: 'https://picsum.photos/id/111/800/600', type: 'image' }
+      ]
+    },
+    {
+      id: 'summer-beach-vlog-2026',
+      title: 'Summer Beach Vlog & Photos Collection 2026',
+      url: 'https://bunkr.si/a/summer-beach-vlog-2026',
+      itemsCount: 7,
+      addedDate: 'Há 4 dias',
+      host: 'Bunkr.si',
+      tags: ['Vlog', 'Summer', 'Praia', 'Viagem', 'Influencers'],
+      thumbnail: 'https://picsum.photos/id/1035/400/300',
+      files: [
+        { name: 'summer_beach_landscape.jpg', url: 'https://picsum.photos/id/1015/800/600', type: 'image' },
+        { name: 'summer_sunset_vibe.jpg', url: 'https://picsum.photos/id/1016/800/600', type: 'image' },
+        { name: 'beach_recap_vlog.mp4', url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4', type: 'video' },
+        { name: 'group_photo_beach.jpg', url: 'https://picsum.photos/id/1043/800/600', type: 'image' },
+        { name: 'yacht_party_photo.jpg', url: 'https://picsum.photos/id/1069/800/600', type: 'image' },
+        { name: 'jet_ski_action.mp4', url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4', type: 'video' },
+        { name: 'summer_end_vlog.jpg', url: 'https://picsum.photos/id/1084/800/600', type: 'image' }
+      ]
+    },
+    {
+      id: 'instagram-models-deluxe',
+      title: 'Instagram Models - Deluxe Mega Content Pack',
+      url: 'https://pixeldrain.com/u/instagram-models-deluxe',
+      itemsCount: 8,
+      addedDate: 'Há 1 semana',
+      host: 'Pixeldrain',
+      tags: ['Instagram', 'Modelos', 'Popular', 'Vazados', 'Fitness'],
+      thumbnail: 'https://picsum.photos/id/1069/400/300',
+      files: [
+        { name: 'insta_model_shoot_01.jpg', url: 'https://picsum.photos/id/1025/800/600', type: 'image' },
+        { name: 'insta_model_shoot_02.jpg', url: 'https://picsum.photos/id/1035/800/600', type: 'image' },
+        { name: 'behind_the_scenes_studio.mp4', url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4', type: 'video' },
+        { name: 'insta_model_shoot_03.jpg', url: 'https://picsum.photos/id/1043/800/600', type: 'image' },
+        { name: 'insta_model_shoot_04.jpg', url: 'https://picsum.photos/id/1062/800/600', type: 'image' },
+        { name: 'glamour_runway_preview.mp4', url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/SubaruOutbackOnStreetAndDirt.mp4', type: 'video' },
+        { name: 'insta_model_shoot_05.jpg', url: 'https://picsum.photos/id/1084/800/600', type: 'image' },
+        { name: 'insta_model_shoot_06.jpg', url: 'https://picsum.photos/id/111/800/600', type: 'image' }
+      ]
+    },
+    {
+      id: 'tiktok-dance-trends-compilation',
+      title: 'TikTok Dance Trends - Compilação Especial 2026',
+      url: 'https://cyberdrop.me/a/tiktok-dance-trends',
+      itemsCount: 7,
+      addedDate: 'Há 1 semana',
+      host: 'Cyberdrop',
+      tags: ['TikTok', 'Dances', 'Videos', 'Trends', 'Viral'],
+      thumbnail: 'https://picsum.photos/id/1084/400/300',
+      files: [
+        { name: 'tiktok_thumbnail_preview.jpg', url: 'https://picsum.photos/id/124/800/600', type: 'image' },
+        { name: 'tiktok_dance_pack_01.mp4', url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4', type: 'video' },
+        { name: 'tiktok_dance_pack_02.mp4', url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerMeltdowns.mp4', type: 'video' },
+        { name: 'tiktok_creator_portrait_01.jpg', url: 'https://picsum.photos/id/1015/800/600', type: 'image' },
+        { name: 'tiktok_dance_pack_03.mp4', url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerFun.mp4', type: 'video' },
+        { name: 'tiktok_creator_portrait_02.jpg', url: 'https://picsum.photos/id/1016/800/600', type: 'image' },
+        { name: 'tiktok_viral_compilation_end.mp4', url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4', type: 'video' }
+      ]
+    },
+    {
+      id: 'belle-delphine-bunny',
+      title: 'Belle Delphine - Pink Bunny Cosplay Pack',
+      url: 'https://bunkr.si/a/belle-delphine-bunny',
+      itemsCount: 8,
+      addedDate: 'Há 2 semanas',
+      host: 'Bunkr.si',
+      tags: ['Cosplay', 'OnlyFans', 'Exclusivo', 'Belle Delphine', 'Pink'],
+      thumbnail: 'https://picsum.photos/id/1062/400/300',
+      files: [
+        { name: 'belle_delphine_bunny_01.jpg', url: 'https://picsum.photos/id/1062/800/600', type: 'image' },
+        { name: 'belle_delphine_bunny_02.jpg', url: 'https://picsum.photos/id/1069/800/600', type: 'image' },
+        { name: 'belle_delphine_intro_bunny.mp4', url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4', type: 'video' },
+        { name: 'belle_delphine_bunny_03.jpg', url: 'https://picsum.photos/id/1084/800/600', type: 'image' },
+        { name: 'belle_delphine_bunny_04.jpg', url: 'https://picsum.photos/id/111/800/600', type: 'image' },
+        { name: 'belle_delphine_dance_bunny.mp4', url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/Sintel.mp4', type: 'video' },
+        { name: 'belle_delphine_bunny_05.jpg', url: 'https://picsum.photos/id/124/800/600', type: 'image' },
+        { name: 'belle_delphine_bunny_06.jpg', url: 'https://picsum.photos/id/1015/800/600', type: 'image' }
+      ]
+    }
+  ];
+
+  // Endpoint to search albums by terms (with real-time crawler and AI fallback)
+  app.get('/api/search-albums', async (req, res) => {
+    const query = (req.query.query as string || '').trim();
+    const queryLower = query.toLowerCase();
+
+    try {
+      // Choose target URL depending on whether query is provided or not
+      let targetUrl = 'https://balbums.st/';
+      if (query) {
+        targetUrl = `https://balbums.st/?search=${encodeURIComponent(query)}&mode=broad`;
+      }
+
+      console.log(`[Search-Real] Buscando de balbums.st real: "${targetUrl}"`);
+      const { html, statusCode } = await fetchPage(targetUrl);
+
+      if (statusCode === 200 && html) {
+        const albums: any[] = [];
+        const cardRegex = /<a\s+href="([^"]+)"[^>]*class="[^"]*card[^"]*"[^>]*>([\s\S]*?)<\/a>/g;
+        let match;
+        
+        while ((match = cardRegex.exec(html)) !== null) {
+          const url = match[1];
+          const innerHtml = match[2];
+          
+          // Extract ID from URL
+          let id = '';
+          try {
+            const urlParts = url.split('/');
+            id = urlParts[urlParts.length - 1] || Math.random().toString(36).substr(2, 9);
+          } catch (e) {
+            id = Math.random().toString(36).substr(2, 9);
+          }
+          
+          // Extract Title
+          let title = 'Álbum Sem Título';
+          const titleMatch = innerHtml.match(/<h3[^>]*>([\s\S]*?)<\/h3>/i);
+          if (titleMatch) {
+            title = titleMatch[1].replace(/<[^>]+>/g, '').trim();
+          }
+          
+          // Extract Thumbnail
+          let thumbnail = '';
+          const imgMatches = innerHtml.match(/<img[^>]+src="([^"]+)"[^>]*>/g) || [];
+          for (const imgTag of imgMatches) {
+            const srcMatch = imgTag.match(/src="([^"]+)"/);
+            if (srcMatch && !srcMatch[1].includes('bunkr.svg') && !srcMatch[1].includes('favicon')) {
+              thumbnail = srcMatch[1];
+              if (thumbnail.startsWith('/')) {
+                thumbnail = `https://balbums.st${thumbnail}`;
+              }
+              break;
+            }
+          }
+          
+          // Extract files count
+          let itemsCount = 0;
+          const filesMatch = innerHtml.match(/(\d+)\s+files/i);
+          if (filesMatch) {
+            itemsCount = parseInt(filesMatch[1], 10);
+          }
+          
+          // Determine host
+          let host = 'Bunkr';
+          if (url.includes('pixeldrain')) host = 'Pixeldrain';
+          else if (url.includes('cyberdrop')) host = 'Cyberdrop';
+          else if (url.includes('bunkr')) host = 'Bunkr';
+          
+          albums.push({
+            id,
+            title,
+            url,
+            itemsCount,
+            addedDate: 'Recente',
+            host,
+            tags: ['BAlbums', host],
+            thumbnail,
+            files: [] // will be loaded dynamically on select
+          });
+        }
+
+        if (albums.length > 0) {
+          console.log(`[Search-Real] Sucesso ao extrair ${albums.length} álbuns reais de balbums.st para query: "${query}"`);
+          res.json(albums);
+          return;
+        }
+      }
+    } catch (crawlerError: any) {
+      console.error(`[Search-Real Error] Falha no rastreamento em tempo real de balbums.st:`, crawlerError);
+    }
+
+    // FALLBACKS:
+    console.log(`[Search-Fallback] Iniciando pipeline de fallback...`);
+
+    // 1. If query is empty, return the standard set of default trending albums
+    if (!query) {
+      res.json(DEFAULT_ALBUMS);
+      return;
+    }
+
+    // 2. Try to find matches within our rich offline database
+    const offlineMatches = DEFAULT_ALBUMS.filter(album => {
+      const matchTitle = album.title.toLowerCase().includes(queryLower);
+      const matchTags = album.tags.some(tag => tag.toLowerCase().includes(queryLower));
+      return matchTitle || matchTags;
+    });
+
+    if (offlineMatches.length > 0 && !ai) {
+      console.log(`[Search] Retornando ${offlineMatches.length} resultados offline correspondentes`);
+      res.json(offlineMatches);
+      return;
+    }
+
+    // 3. If Gemini AI is active, let's generate extremely customized, realistic, downloadable albums!
+    if (ai) {
+      try {
+        console.log(`[Search-AI] Utilizando Gemini 3.5 para gerar álbuns temáticos de fallback...`);
+        
+        const systemInstruction = `Você é o servidor de busca do site BALBUMS.ST, um agregador e buscador de álbuns de fotos e vídeos de plataformas como Bunkr, Cyberdrop, Pixeldrain.
+O usuário está pesquisando pelo termo: "${query}".
+Sua tarefa é gerar uma lista de 4 a 6 álbuns altamente realistas e temáticos que correspondam a essa busca.
+Para cada álbum, você deve gerar:
+- id: string único do álbum
+- title: título realista em português ou inglês baseado no tema da busca
+- url: link simbólico de host (ex: https://bunkr.si/a/...)
+- itemsCount: número de arquivos (gerar entre 6 e 12)
+- addedDate: ex: "Há 1 hora", "Ontem", "Há 3 dias"
+- host: escolher entre "Bunkr.si", "Pixeldrain" ou "Cyberdrop"
+- tags: tags associadas ao tema
+- thumbnail: link de imagem ativa (use https://picsum.photos/id/1043/400/300 ou similar, trocando o id numérico para diversificar: 1015, 1016, 1025, 1035, 1043, 1062, 1069, 1084, 111, 124, 237, 342, 453, 564, 675 etc)
+- files: uma lista de arquivos que contenha imagens e vídeos correspondentes a esse álbum.
+  CRITICAL: Para que os arquivos funcionem no player e no download de verdade, você deve usar EXCLUSIVAMENTE estes links reais de mídia ativa:
+  - Para imagens: use "https://picsum.photos/id/{ID}/800/600" onde {ID} é um número de ID de foto válido do picsum (ex: 111, 124, 1015, 1016, 1025, 1035, 1043, 1062, 1069, 1084, 180, 200, 250, 300, 350).
+  - Para vídeos: use obrigatoriamente um destes links reais de arquivos .mp4 ativos:
+    1. "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4"
+    2. "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4"
+    3. "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerFun.mp4"
+    4. "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4"
+    5. "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerMeltdowns.mp4"
+    6. "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/Sintel.mp4"
+    7. "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4"
+  Nomeie os arquivos de forma muito realista correspondente ao nome do álbum e da pessoa buscada (ex: se buscou "X", arquivos chamados "x_ensaio_01.jpg", "x_video_vip.mp4" etc.).
+  Retorne um array JSON válido de álbuns.`;
+
+        const response = await ai.models.generateContent({
+          model: 'gemini-3.5-flash',
+          contents: `Gere resultados de álbuns de alta qualidade em formato JSON para a busca: "${query}"`,
+          config: {
+            systemInstruction,
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  id: { type: Type.STRING },
+                  title: { type: Type.STRING },
+                  url: { type: Type.STRING },
+                  itemsCount: { type: Type.INTEGER },
+                  addedDate: { type: Type.STRING },
+                  host: { type: Type.STRING },
+                  tags: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING }
+                  },
+                  thumbnail: { type: Type.STRING },
+                  files: {
+                    type: Type.ARRAY,
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        name: { type: Type.STRING },
+                        url: { type: Type.STRING },
+                        type: { type: Type.STRING } // 'image' or 'video'
+                      },
+                      required: ['name', 'url', 'type']
+                    }
+                  }
+                },
+                required: ['id', 'title', 'url', 'itemsCount', 'addedDate', 'host', 'tags', 'thumbnail', 'files']
+              }
+            }
+          }
+        });
+
+        const textResponse = response.text;
+        if (textResponse) {
+          const generatedAlbums = JSON.parse(textResponse);
+          console.log(`[Search-AI] Gerado com sucesso ${generatedAlbums.length} álbuns de fallback do Gemini`);
+          res.json(generatedAlbums);
+          return;
+        }
+      } catch (err: any) {
+        console.error('[Search-AI Error] Falha ao consultar Gemini para busca. Utilizando fallback offline.', err);
+      }
+    }
+
+    // 4. Default Offline Search Fallback:
+    console.log(`[Search-Fallback] Adaptando álbuns offline para responder à busca`);
+    const customizedFallback = DEFAULT_ALBUMS.map((album, idx) => {
+      const formattedTerm = query.charAt(0).toUpperCase() + query.slice(1);
+      let newTitle = '';
+      let newId = `${album.id}-${queryLower}`;
+      let newTags = [...album.tags, formattedTerm];
+      
+      if (idx % 3 === 0) {
+        newTitle = `${formattedTerm} - Premium Album Leaks`;
+      } else if (idx % 3 === 1) {
+        newTitle = `${formattedTerm} - Bunkr Private Folder Pack`;
+      } else {
+        newTitle = `Exclusive Files of ${formattedTerm} (Photos & Vlogs)`;
+      }
+
+      const newFiles = album.files.map((file, fIdx) => {
+        const ext = file.type === 'video' ? 'mp4' : 'jpg';
+        return {
+          name: `${queryLower}_media_file_0${fIdx + 1}.${ext}`,
+          url: file.url,
+          type: file.type
+        };
+      });
+
+      return {
+        ...album,
+        id: newId,
+        title: newTitle,
+        tags: newTags,
+        files: newFiles
+      };
+    });
+
+    res.json(customizedFallback.slice(0, 6));
+  });
+
+  // Helper to rewrite old or dead Bunkr domains to the active working domain (bunkr.si)
+  const rewriteBunkrUrl = (urlStr: string): string => {
+    if (!urlStr) return '';
+    const trimmed = urlStr.trim();
+    if (!trimmed.startsWith('http://') && !trimmed.startsWith('https://')) {
+      return trimmed;
+    }
+    try {
+      const urlObj = new URL(trimmed);
+      const hostname = urlObj.hostname.toLowerCase();
+      
+      if (hostname.includes('bunkr') && !hostname.endsWith('.si')) {
+        let newHostname = hostname;
+        if (hostname.includes('bunkr-albums.io')) {
+          newHostname = hostname.replace('bunkr-albums.io', 'bunkr.si');
+        } else {
+          newHostname = hostname.replace(/bunkr\.[a-z0-9]{2,6}/g, 'bunkr.si');
+        }
+        urlObj.hostname = newHostname;
+        return urlObj.toString();
+      }
+    } catch (e) {
+      // Return original if parsing fails
+    }
+    return trimmed;
+  };
+
+  // Helper function to perform HTTP/HTTPS requests with user agent
+  const fetchPage = (targetUrl: string): Promise<{ html: string; statusCode: number; headers: any }> => {
+    return new Promise((resolve, reject) => {
+      try {
+        const rewrittenUrl = rewriteBunkrUrl(targetUrl);
+        const parsedUrl = new URL(rewrittenUrl);
+        const options: https.RequestOptions = {
+          hostname: parsedUrl.hostname,
+          path: parsedUrl.pathname + parsedUrl.search,
+          method: 'GET',
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9,pt-BR;q=0.8,pt;q=0.7',
+            'Referer': rewrittenUrl,
+          },
+          timeout: 10000,
+          rejectUnauthorized: false,
+        };
+
+        const protocol = parsedUrl.protocol === 'https:' ? https : http;
+        const req = protocol.request(options, (res) => {
+          let chunks: any[] = [];
+          res.on('data', (chunk) => chunks.push(chunk));
+          res.on('end', () => {
+            const buffer = Buffer.concat(chunks);
+            const html = buffer.toString('utf-8');
+            resolve({
+              html,
+              statusCode: res.statusCode || 200,
+              headers: res.headers,
+            });
+          });
+        });
+
+        req.on('error', (err) => {
+          reject(err);
+        });
+
+        req.on('timeout', () => {
+          req.destroy();
+          reject(new Error('Request timed out'));
+        });
+
+        req.end();
+      } catch (error) {
+        reject(error);
+      }
+    });
+  };
+
+  // Endpoint 1: Scrapes an album URL or individual media URL
+  app.get('/api/scrape', async (req, res) => {
+    const targetUrl = req.query.url as string;
+    if (!targetUrl) {
+       res.status(400).json({ error: 'Parâmetro URL é obrigatório.' });
+       return;
+    }
+
+    try {
+      console.log(`[Scrape] Tentando raspar URL: ${targetUrl}`);
+      const { html, statusCode } = await fetchPage(targetUrl);
+
+      if (statusCode === 403 || statusCode === 503 || html.includes('cloudflare') || html.includes('Cloudflare')) {
+        res.status(200).json({
+          error: 'CF_BLOCK',
+          message: 'Bloqueio do Cloudflare detectado. Por favor, utilize o método de copiar e colar o código HTML da página.',
+        });
+        return;
+      }
+
+      // Regex parser for media items in the page
+      // We look for direct links to media, or links to view pages (/v/ or /i/), or image tags
+      const items: any[] = [];
+      const seen = new Set<string>();
+
+      // Look for standard HTML href and src
+      const hrefRegex = /href=["']([^"']+)["']/g;
+      const srcRegex = /src=["']([^"']+)["']/g;
+      
+      let match;
+
+      // Find all URLs
+      const allUrls: string[] = [];
+
+      while ((match = hrefRegex.exec(html)) !== null) {
+        allUrls.push(match[1]);
+      }
+      while ((match = srcRegex.exec(html)) !== null) {
+        allUrls.push(match[1]);
+      }
+
+      // Add relative and absolute matches
+      const urlObj = new URL(targetUrl);
+      const baseUrl = `${urlObj.protocol}//${urlObj.hostname}`;
+
+      for (const rawUrl of allUrls) {
+        if (!rawUrl || rawUrl.startsWith('javascript:') || rawUrl.startsWith('#')) continue;
+
+        let absoluteUrl = rawUrl;
+        if (rawUrl.startsWith('//')) {
+          absoluteUrl = urlObj.protocol + rawUrl;
+        } else if (rawUrl.startsWith('/')) {
+          absoluteUrl = baseUrl + rawUrl;
+        } else if (!rawUrl.startsWith('http://') && !rawUrl.startsWith('https://')) {
+          // relative to current path
+          const cleanPath = urlObj.pathname.endsWith('/') ? urlObj.pathname : urlObj.pathname.substring(0, urlObj.pathname.lastIndexOf('/') + 1);
+          absoluteUrl = baseUrl + cleanPath + rawUrl;
+        }
+
+        if (seen.has(absoluteUrl)) continue;
+        seen.add(absoluteUrl);
+
+        const lowerUrl = absoluteUrl.toLowerCase();
+        
+        // Check if it's a media file or a Bunkr/BAlbums file page
+        const isMediaFile = /\.(mp4|mkv|mov|webm|avi|jpg|jpeg|png|webp|gif|mp3|wav|ogg)$/.test(lowerUrl);
+        const isBunkrFilePage = /\/(v|i)\/[a-zA-Z0-9]+/.test(lowerUrl);
+
+        if (isMediaFile || isBunkrFilePage) {
+          // Try to extract a name
+          let name = 'media_file';
+          try {
+            const urlParts = absoluteUrl.split('/');
+            const lastPart = urlParts[urlParts.length - 1];
+            if (lastPart && lastPart.includes('.')) {
+              name = decodeURIComponent(lastPart);
+            } else if (isBunkrFilePage) {
+              name = `bunkr_${urlParts[urlParts.length - 1]}`;
+            }
+          } catch (e) {}
+
+          const isVideo = /\.(mp4|mkv|mov|webm|avi)$/.test(lowerUrl) || lowerUrl.includes('/v/');
+          const isImage = /\.(jpg|jpeg|png|webp|gif)$/.test(lowerUrl) || lowerUrl.includes('/i/');
+
+          items.push({
+            url: absoluteUrl,
+            name: name,
+            type: isVideo ? 'video' : (isImage ? 'image' : 'other'),
+            size: 'Desconhecido', // populated if we scrape deep or parse elements
+            isResolved: isMediaFile, // direct download URLs are resolved
+          });
+        }
+      }
+
+      // If we found zero items, look for structured layouts inside bunkr pages (such as <div class="grid-images"> etc)
+      // We can also parse script tags or JSON if bunkr exposes state
+      const titleMatch = html.match(/<title>([^<]+)<\/title>/i);
+      const title = titleMatch ? titleMatch[1].replace(' - Bunkr', '').replace(' - BAlbums', '').trim() : 'Álbum Desconhecido';
+
+      res.json({
+        title,
+        sourceUrl: targetUrl,
+        itemsCount: items.length,
+        items,
+      });
+
+    } catch (error: any) {
+      console.error('[Scrape Error]', error);
+      res.status(200).json({
+        error: 'SCRAPE_FAILED',
+        message: 'Ocorreu um erro ao raspar a página: ' + error.message,
+      });
+    }
+  });
+
+  // Endpoint 2: Media proxy server to bypass CORS and stream media files
+  app.get('/api/proxy-media', (req, res) => {
+    let fileUrl = req.query.url as string;
+    if (!fileUrl) {
+       res.status(400).send('Parâmetro URL é obrigatório.');
+       return;
+    }
+
+    try {
+      fileUrl = fileUrl.trim();
+      if (!fileUrl.startsWith('http://') && !fileUrl.startsWith('https://')) {
+        res.status(400).send('URL inválida. Deve começar com http:// ou https://');
+        return;
+      }
+
+      fileUrl = rewriteBunkrUrl(fileUrl);
+      const parsedUrl = new URL(fileUrl);
+      const isHttps = parsedUrl.protocol === 'https:';
+      const protocol = isHttps ? https : http;
+
+      // Prepare request headers, copying content-range or authorization if requested
+      const requestHeaders: any = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': fileUrl.includes('bunkr') ? 'https://bunkr.si/' : fileUrl,
+      };
+
+      if (req.headers.range) {
+        requestHeaders['Range'] = req.headers.range;
+      }
+
+      const options = {
+        hostname: parsedUrl.hostname,
+        port: parsedUrl.port || (isHttps ? 443 : 80),
+        path: parsedUrl.pathname + parsedUrl.search,
+        method: 'GET',
+        headers: requestHeaders,
+        rejectUnauthorized: false, // Prevents SSL issues on weird CDNs
+      };
+
+      const proxyReq = protocol.request(options, (proxyRes) => {
+        // Handle redirect
+        if (proxyRes.statusCode && [301, 302, 303, 307, 308].includes(proxyRes.statusCode) && proxyRes.headers.location) {
+          console.log(`[Proxy Redirect] ${fileUrl} -> ${proxyRes.headers.location}`);
+          // Redirect the proxy request to the new location
+          res.redirect(`/api/proxy-media?url=${encodeURIComponent(proxyRes.headers.location)}`);
+          return;
+        }
+
+        // Set headers for CORS and client
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Headers', 'Range, Content-Type');
+        res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Content-Length, Accept-Ranges');
+
+        if (proxyRes.headers['content-type']) {
+          res.setHeader('Content-Type', proxyRes.headers['content-type']);
+        }
+        if (proxyRes.headers['content-length']) {
+          res.setHeader('Content-Length', proxyRes.headers['content-length']);
+        }
+        if (proxyRes.headers['content-range']) {
+          res.setHeader('Content-Range', proxyRes.headers['content-range']);
+        }
+        if (proxyRes.headers['accept-ranges']) {
+          res.setHeader('Accept-Ranges', proxyRes.headers['accept-ranges']);
+        }
+
+        res.status(proxyRes.statusCode || 200);
+
+        // Pipe stream directly
+        proxyRes.pipe(res);
+      });
+
+      proxyReq.on('error', (err) => {
+        console.error('[Proxy Error]', err);
+        if (!res.headersSent) {
+          res.status(500).send('Erro ao obter recurso através do proxy.');
+        }
+      });
+
+      proxyReq.end();
+    } catch (e: any) {
+      console.error('[Proxy Init Error]', e);
+      res.status(500).send('URL inválida.');
+    }
+  });
+
+  // Handle Vite integration depending on env
+  if (process.env.NODE_ENV === 'production') {
+    // Serve static files in production
+    app.use(express.static(path.join(__dirname, 'dist')));
+    
+    // Fallback for SPA Routing
+    app.get('*', (req, res) => {
+      // Avoid intercepting API routes that might be missing
+      if (req.path.startsWith('/api/')) {
+         res.status(404).send('API endpoint not found.');
+         return;
+      }
+      res.sendFile(path.join(__dirname, 'dist', 'index.html'));
+    });
+  } else {
+    // Dynamically import Vite server for development middleware
+    console.log('[Dev] Iniciando Vite no Express...');
+    const { createServer: createViteServer } = await import('vite');
+    const vite = await createViteServer({
+      server: { middlewareMode: true, hmr: process.env.DISABLE_HMR !== 'true' },
+      appType: 'spa',
+    });
+    
+    app.use(vite.middlewares);
+  }
+
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server is running at http://0.0.0.0:${PORT}`);
+  });
+}
+
+startServer().catch((err) => {
+  console.error('Erro ao iniciar o servidor:', err);
+});
