@@ -4,7 +4,6 @@ import {
   Search,
   Image as ImageIcon,
   Video as VideoIcon,
-  FileDown,
   ExternalLink,
   Code,
   AlertTriangle,
@@ -55,7 +54,7 @@ interface SavedAlbum {
   savedAt: string;
 }
 
-// Helper to rewrite old or dead Bunkr domains to the active working domain (bunkr.si)
+// Helper to rewrite old or dead Bunkr domains to the active working domain (bunkr.cr)
 const rewriteBunkrUrl = (urlStr: string): string => {
   if (!urlStr) return '';
   const trimmed = urlStr.trim();
@@ -66,14 +65,21 @@ const rewriteBunkrUrl = (urlStr: string): string => {
     const urlObj = new URL(trimmed);
     const hostname = urlObj.hostname.toLowerCase();
     
-    if (hostname.includes('bunkr') && !hostname.endsWith('.si')) {
+    // Rewrite bunkr domains to .cr
+    if (hostname.includes('bunkr') && !hostname.endsWith('.cr')) {
       let newHostname = hostname;
       if (hostname.includes('bunkr-albums.io')) {
-        newHostname = hostname.replace('bunkr-albums.io', 'bunkr.si');
+        newHostname = hostname.replace('bunkr-albums.io', 'bunkr.cr');
       } else {
-        newHostname = hostname.replace(/bunkr\.[a-z0-9]{2,6}/g, 'bunkr.si');
+        newHostname = hostname.replace(/bunkr\.[a-z0-9]{2,6}/g, 'bunkr.cr');
       }
       urlObj.hostname = newHostname;
+      return urlObj.toString();
+    }
+
+    // Rewrite media-files domains to .cr
+    if (hostname.includes('media-files') && !hostname.endsWith('.cr')) {
+      urlObj.hostname = hostname.replace(/media-files\.[a-z0-9]{2,6}/g, 'media-files.cr');
       return urlObj.toString();
     }
   } catch (e) {
@@ -103,7 +109,7 @@ export default function App() {
   const [customAlbumTitle, setCustomAlbumTitle] = useState('');
 
   // Integrated Same-Origin Webview Scraper States
-  const [webviewInputUrl, setWebviewInputUrl] = useState('https://bunkr.si');
+  const [webviewInputUrl, setWebviewInputUrl] = useState('https://bunkr.cr');
   const [activeWebviewUrl, setActiveWebviewUrl] = useState('');
   const [webviewMediaItems, setWebviewMediaItems] = useState<MediaItem[]>([]);
   const [webviewAlbumTitle, setWebviewAlbumTitle] = useState('');
@@ -291,7 +297,7 @@ export default function App() {
       const seenUrls = new Set<string>();
 
       // Try to determine the base URL of the original page to resolve relative paths
-      let detectedBaseUrl = 'https://bunkr.si';
+      let detectedBaseUrl = 'https://bunkr.cr';
       if (originalUrl) {
         try {
           detectedBaseUrl = new URL(originalUrl).origin;
@@ -612,7 +618,7 @@ export default function App() {
       const seenUrls = new Set<string>();
 
       // Try to determine the base URL of the original page to resolve relative paths
-      let detectedBaseUrl = 'https://bunkr.si';
+      let detectedBaseUrl = 'https://bunkr.cr';
       
       const canonical = doc.querySelector('link[rel="canonical"]')?.getAttribute('href') ||
                         doc.querySelector('meta[property="og:url"]')?.getAttribute('content');
@@ -861,7 +867,20 @@ export default function App() {
     try {
       // Direct call to our backend api
       const response = await fetch(`/api/scrape?url=${encodeURIComponent(inputUrl)}`);
-      const data = await response.json();
+      
+      let data: any;
+      const contentType = response.headers.get('content-type');
+      if (contentType && contentType.includes('application/json')) {
+        data = await response.json();
+      } else {
+        const text = await response.text();
+        console.error('Expected JSON, got non-JSON response:', text);
+        if (text.toLowerCase().includes('cloudflare') || response.status === 403) {
+          data = { error: 'CF_BLOCK', message: 'Bloqueio do Cloudflare detectado. Por favor, utilize o método de copiar e colar o código HTML da página.' };
+        } else {
+          throw new Error('Formato de resposta inválido do servidor de raspagem. Verifique a URL ou utilize o método manual.');
+        }
+      }
 
       if (!response.ok || data.error) {
         if (data.error === 'CF_BLOCK') {
@@ -940,7 +959,14 @@ export default function App() {
         setDownloadStatusText(`Resolvendo link direto para: ${item.name}...`);
         const response = await fetch(`/api/scrape?url=${encodeURIComponent(item.url)}`);
         if (!response.ok) return item.url;
-        const data = await response.json();
+        
+        let data: any;
+        const contentType = response.headers.get('content-type');
+        if (contentType && contentType.includes('application/json')) {
+          data = await response.json();
+        } else {
+          return item.url;
+        }
         
         // Find if there is a resolved direct media link in this view page
         const directMedia = data.items.find((i: any) => i.isResolved);
@@ -1040,47 +1066,128 @@ export default function App() {
     setIsDownloading(false);
   };
 
-  // Download a single file individually bypassing CORS
+  // Download a single file individually bypassing CORS (memory-safe native download stream)
   const handleDownloadSingle = async (item: MediaItem) => {
     try {
-      setDownloadStatusText(`Iniciando download de ${item.name}...`);
+      setDownloadStatusText(`Resolvendo link para ${item.name}...`);
       
       // 1. Resolve link if needed
       let directUrl = item.url;
       if (!item.isResolved) {
         const response = await fetch(`/api/scrape?url=${encodeURIComponent(item.url)}`);
         if (response.ok) {
-          const data = await response.json();
-          const directMedia = data.items.find((i: any) => i.isResolved);
-          if (directMedia) directUrl = directMedia.url;
+          let data: any;
+          const contentType = response.headers.get('content-type');
+          if (contentType && contentType.includes('application/json')) {
+            data = await response.json();
+            const directMedia = data?.items?.find((i: any) => i.isResolved);
+            if (directMedia) directUrl = directMedia.url;
+          }
         }
       }
 
-      // 2. Trigger browser download via proxy
-      const proxyUrl = `/api/proxy-media?url=${encodeURIComponent(directUrl)}`;
-      const response = await fetch(proxyUrl);
-      if (!response.ok) throw new Error('Falha ao baixar arquivo');
-      
-      const blob = await response.blob();
-      const blobUrl = URL.createObjectURL(blob);
+      // 2. Trigger native browser stream download via proxy (ZERO memory-overhead)
+      setDownloadStatusText(`Baixando: ${item.name} via navegador...`);
+      const finalDownloadUrl = `/api/proxy-media?url=${encodeURIComponent(directUrl)}&download=true&filename=${encodeURIComponent(item.name)}`;
       
       const link = document.createElement('a');
-      link.href = blobUrl;
+      link.href = finalDownloadUrl;
       link.download = item.name;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
       
-      setTimeout(() => URL.revokeObjectURL(blobUrl), 100);
+      setDownloadStatusText('Download iniciado pelo navegador com sucesso!');
       
       confetti({
-        particleCount: 30,
-        spread: 40,
+        particleCount: 40,
+        spread: 50,
         origin: { y: 0.8 }
       });
     } catch (e: any) {
       alert(`Falha no download direto: ${e.message}. Tente abrir o link e salvar manualmente.`);
     }
+  };
+
+  // Safe multi-downloader triggering successive browser stream downloads
+  const handleDownloadAllIndividual = async () => {
+    const itemsToDownload = mediaItems.filter(item => selectedIds.has(item.id));
+    if (itemsToDownload.length === 0) {
+      alert('Nenhum arquivo selecionado para download.');
+      return;
+    }
+
+    setIsDownloading(true);
+    setDownloadProgress(0);
+    setDownloadedCount(0);
+    setTotalToDownload(itemsToDownload.length);
+    setFailedDownloads([]);
+    setDownloadStatusText('Iniciando disparos de download sequencial...');
+
+    let count = 0;
+    
+    const resolveDirectUrl = async (item: MediaItem): Promise<string> => {
+      if (item.isResolved) return item.url;
+      try {
+        setDownloadStatusText(`Resolvendo: ${item.name}...`);
+        const response = await fetch(`/api/scrape?url=${encodeURIComponent(item.url)}`);
+        if (!response.ok) return item.url;
+        
+        let data: any;
+        const contentType = response.headers.get('content-type');
+        if (contentType && contentType.includes('application/json')) {
+          data = await response.json();
+        } else {
+          return item.url;
+        }
+        
+        const directMedia = data.items.find((i: any) => i.isResolved);
+        if (directMedia) {
+          item.url = directMedia.url;
+          item.isResolved = true;
+          return directMedia.url;
+        }
+      } catch (e) {
+        console.error('Erro ao resolver link:', e);
+      }
+      return item.url;
+    };
+
+    for (let i = 0; i < itemsToDownload.length; i++) {
+      const item = itemsToDownload[i];
+      try {
+        const directUrl = await resolveDirectUrl(item);
+        setDownloadStatusText(`Baixando (${i + 1}/${itemsToDownload.length}): ${item.name}`);
+        
+        const finalDownloadUrl = `/api/proxy-media?url=${encodeURIComponent(directUrl)}&download=true&filename=${encodeURIComponent(item.name)}`;
+        
+        const link = document.createElement('a');
+        link.href = finalDownloadUrl;
+        link.download = item.name;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        
+        count++;
+        setDownloadedCount(count);
+        setDownloadProgress(Math.round((count / itemsToDownload.length) * 100));
+        
+        // Wait 400ms between streams to prevent browsers blocking popups or multiple downloads
+        await new Promise(resolve => setTimeout(resolve, 400));
+      } catch (error) {
+        console.error(`Falha no download para ${item.name}:`, error);
+        setFailedDownloads(prev => [...prev, item]);
+      }
+    }
+
+    setDownloadStatusText(`Fila concluída! Downloads iniciados com sucesso: ${count}/${itemsToDownload.length}`);
+    setIsDownloading(false);
+    
+    confetti({
+      particleCount: 120,
+      spread: 70,
+      origin: { y: 0.6 }
+    });
   };
 
   // Add current album to Saved Albums Library
@@ -1727,7 +1834,7 @@ export default function App() {
                     <button 
                       onClick={() => {
                         // Simply reloads/goes back home
-                        setActiveWebviewUrl('https://bunkr.si');
+                        setActiveWebviewUrl('https://bunkr.cr');
                       }}
                       className="p-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white transition"
                       title="Voltar ao início"
@@ -1768,7 +1875,7 @@ export default function App() {
                           setActiveWebviewUrl(finalUrl);
                         }
                       }}
-                      placeholder="Insira a URL do álbum (ex: bunkr.si ou balbums.st)"
+                      placeholder="Insira a URL do álbum (ex: bunkr.cr ou balbums.st)"
                       className="w-full bg-slate-900 border border-slate-800 rounded-xl py-2 pl-9 pr-24 text-xs text-slate-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 transition font-mono"
                     />
                     <div className="absolute right-2 flex items-center gap-1">
@@ -1827,7 +1934,7 @@ export default function App() {
                       <div className="grid grid-cols-2 gap-3 w-full max-w-md">
                         <div
                           onClick={() => {
-                            const url = 'https://bunkr.si';
+                            const url = 'https://bunkr.cr';
                             setWebviewInputUrl(url);
                             setActiveWebviewUrl(url);
                             setIsWebviewLoading(true);
@@ -1835,7 +1942,7 @@ export default function App() {
                           className="bg-slate-900/60 hover:bg-slate-900 border border-slate-850 hover:border-slate-800 p-3.5 rounded-xl cursor-pointer transition text-left"
                         >
                           <span className="text-[9px] uppercase font-bold text-slate-500">Site Oficial</span>
-                          <h5 className="text-xs font-bold text-slate-200 mt-1">Bunkr.si</h5>
+                          <h5 className="text-xs font-bold text-slate-200 mt-1">Bunkr.cr</h5>
                           <p className="text-[10px] text-slate-600 mt-0.5 leading-normal">Página inicial do maior portal de arquivos digitais.</p>
                         </div>
                         <div
@@ -2473,24 +2580,40 @@ export default function App() {
                   </div>
 
                   {/* Core Download Hub Trigger */}
-                  <div className="flex flex-col sm:flex-row items-center gap-3 mt-1">
-                    <button
-                      onClick={handleDownloadAll}
-                      disabled={isDownloading || selectedIds.size === 0}
-                      id="btn-download-all"
-                      className="w-full sm:flex-1 bg-gradient-to-r from-emerald-600 via-teal-600 to-indigo-600 hover:from-emerald-500 hover:via-teal-500 hover:to-indigo-500 active:scale-[0.99] text-white font-extrabold text-sm py-4 px-6 rounded-2xl shadow-lg shadow-emerald-500/5 flex items-center justify-center gap-2.5 transition duration-150 disabled:opacity-50 disabled:pointer-events-none"
-                    >
-                      <FileDown className="h-5 w-5" />
-                      Baixar Mídias Selecionadas (.zip)
-                    </button>
-                    
-                    {mediaItems.length > 0 && (
+                  <div className="flex flex-col gap-3 mt-1 w-full">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 w-full">
                       <button
-                        onClick={() => setMediaItems([])}
-                        className="w-full sm:w-auto bg-slate-950 hover:bg-slate-900 text-slate-400 hover:text-slate-300 text-xs font-semibold px-4 py-4 rounded-2xl border border-slate-850 transition duration-150"
+                        onClick={handleDownloadAllIndividual}
+                        disabled={isDownloading || selectedIds.size === 0}
+                        id="btn-download-all-individual"
+                        className="w-full bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-600 hover:from-indigo-500 hover:via-purple-500 hover:to-pink-500 active:scale-[0.99] text-white font-extrabold text-xs md:text-sm py-3.5 px-5 rounded-2xl shadow-lg flex items-center justify-center gap-2 transition duration-150 disabled:opacity-50 disabled:pointer-events-none"
+                        title="Baixa os arquivos um de cada vez pelo gerenciador de downloads do navegador. Não trava o navegador e suporta vídeos pesados!"
                       >
-                        Limpar Álbum
+                        <Download className="h-4 w-4 animate-bounce" />
+                        Baixar em Lote (Nativo / Super Rápido ⚡)
                       </button>
+
+                      <button
+                        onClick={handleDownloadAll}
+                        disabled={isDownloading || selectedIds.size === 0}
+                        id="btn-download-all-zip"
+                        className="w-full bg-slate-900 hover:bg-slate-850 active:scale-[0.99] text-slate-200 hover:text-white font-bold text-xs md:text-sm py-3.5 px-5 rounded-2xl border border-slate-800 flex items-center justify-center gap-2 transition duration-150 disabled:opacity-50 disabled:pointer-events-none"
+                        title="Compacta todos os selecionados em um único arquivo .zip (Recomendado apenas para imagens ou poucos arquivos pequenos)."
+                      >
+                        <FileArchive className="h-4 w-4" />
+                        Baixar Selecionadas (.zip)
+                      </button>
+                    </div>
+
+                    {mediaItems.length > 0 && (
+                      <div className="flex justify-end">
+                        <button
+                          onClick={() => setMediaItems([])}
+                          className="text-slate-500 hover:text-red-400 text-xs font-semibold px-3 py-1.5 rounded-xl hover:bg-red-500/10 border border-transparent hover:border-red-500/20 transition duration-150"
+                        >
+                          Limpar Álbum
+                        </button>
+                      </div>
                     )}
                   </div>
                 </div>

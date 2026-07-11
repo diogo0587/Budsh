@@ -490,7 +490,7 @@ Para cada álbum, você deve gerar:
     res.json(customizedFallback);
   });
 
-  // Helper to rewrite old or dead Bunkr domains to the active working domain (bunkr.si)
+  // Helper to rewrite old or dead Bunkr domains to the active working domain (bunkr.cr)
   const rewriteBunkrUrl = (urlStr: string): string => {
     if (!urlStr) return '';
     const trimmed = urlStr.trim();
@@ -501,14 +501,21 @@ Para cada álbum, você deve gerar:
       const urlObj = new URL(trimmed);
       const hostname = urlObj.hostname.toLowerCase();
       
-      if (hostname.includes('bunkr') && !hostname.endsWith('.si')) {
+      // Rewrite bunkr domains to .cr
+      if (hostname.includes('bunkr') && !hostname.endsWith('.cr')) {
         let newHostname = hostname;
         if (hostname.includes('bunkr-albums.io')) {
-          newHostname = hostname.replace('bunkr-albums.io', 'bunkr.si');
+          newHostname = hostname.replace('bunkr-albums.io', 'bunkr.cr');
         } else {
-          newHostname = hostname.replace(/bunkr\.[a-z0-9]{2,6}/g, 'bunkr.si');
+          newHostname = hostname.replace(/bunkr\.[a-z0-9]{2,6}/g, 'bunkr.cr');
         }
         urlObj.hostname = newHostname;
+        return urlObj.toString();
+      }
+
+      // Rewrite media-files domains to .cr
+      if (hostname.includes('media-files') && !hostname.endsWith('.cr')) {
+        urlObj.hostname = hostname.replace(/media-files\.[a-z0-9]{2,6}/g, 'media-files.cr');
         return urlObj.toString();
       }
     } catch (e) {
@@ -598,9 +605,13 @@ Para cada álbum, você deve gerar:
             const buffer = Buffer.concat(chunks);
             const html = buffer.toString('utf-8');
             
-            // If proxy returns an error code and the response doesn't look like bunkr/balbums, fallback to direct
-            if (res.statusCode && res.statusCode >= 400 && !html.includes('bunkr') && !html.includes('balbums')) {
-              console.warn(`[CORS Proxy] Status de erro do proxy: ${res.statusCode}. Tentando requisição direta.`);
+            const trimmedHtml = html.trim();
+            const isHtml = trimmedHtml.startsWith('<') || html.includes('<html') || html.includes('<div') || html.includes('<!DOCTYPE') || html.includes('<body');
+            const isProxyError = html.startsWith('The page') || html.includes('could not be loaded') || html.includes('Proxy Error') || html.includes('corsproxy.io') || html.length < 200 || trimmedHtml === '';
+
+            // If proxy returns an error code, non-HTML content, or a known proxy error text, fallback to direct fetch
+            if ((res.statusCode && res.statusCode >= 400) || !isHtml || isProxyError) {
+              console.warn(`[CORS Proxy] Resposta inválida ou erro do proxy (Status: ${res.statusCode}, IsHTML: ${isHtml}, IsProxyError: ${isProxyError}). Tentando requisição direta.`);
               fetchPageDirect(targetUrl).then(resolve).catch(reject);
             } else {
               resolve({
@@ -766,10 +777,18 @@ Para cada álbum, você deve gerar:
       const isHttps = parsedUrl.protocol === 'https:';
       const protocol = isHttps ? https : http;
 
+      // Determine correct referer
+      let referer = 'https://bunkr.cr/';
+      if (fileUrl.includes('balbums')) {
+        referer = 'https://balbums.st/';
+      } else if (!fileUrl.includes('bunkr') && !fileUrl.includes('media-files')) {
+        referer = fileUrl; // Default fallback for other domains
+      }
+
       // Prepare request headers, copying content-range or authorization if requested
       const requestHeaders: any = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Referer': fileUrl.includes('bunkr') ? 'https://bunkr.si/' : fileUrl,
+        'Referer': referer,
       };
 
       if (req.headers.range) {
@@ -789,8 +808,9 @@ Para cada álbum, você deve gerar:
         // Handle redirect
         if (proxyRes.statusCode && [301, 302, 303, 307, 308].includes(proxyRes.statusCode) && proxyRes.headers.location) {
           console.log(`[Proxy Redirect] ${fileUrl} -> ${proxyRes.headers.location}`);
-          // Redirect the proxy request to the new location
-          res.redirect(`/api/proxy-media?url=${encodeURIComponent(proxyRes.headers.location)}`);
+          const downloadParam = req.query.download === 'true' ? '&download=true' : '';
+          const filenameParam = req.query.filename ? `&filename=${encodeURIComponent(req.query.filename as string)}` : '';
+          res.redirect(`/api/proxy-media?url=${encodeURIComponent(proxyRes.headers.location)}${downloadParam}${filenameParam}`);
           return;
         }
 
@@ -812,6 +832,12 @@ Para cada álbum, você deve gerar:
           res.setHeader('Accept-Ranges', proxyRes.headers['accept-ranges']);
         }
 
+        const shouldDownload = req.query.download === 'true';
+        if (shouldDownload) {
+          const customFilename = req.query.filename as string || parsedUrl.pathname.split('/').pop() || 'file';
+          res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(customFilename)}"`);
+        }
+
         res.status(proxyRes.statusCode || 200);
 
         // Pipe stream directly
@@ -825,10 +851,20 @@ Para cada álbum, você deve gerar:
         }
       });
 
+      // Handle request timeout to prevent hanging connections (especially on big streams)
+      proxyReq.setTimeout(45000, () => {
+        proxyReq.destroy();
+        if (!res.headersSent) {
+          res.status(504).send('Gateway Timeout');
+        }
+      });
+
       proxyReq.end();
-    } catch (e: any) {
-      console.error('[Proxy Init Error]', e);
-      res.status(500).send('URL inválida.');
+    } catch (error: any) {
+      console.error('[Proxy Server Error]', error);
+      if (!res.headersSent) {
+        res.status(500).send('Erro interno do servidor proxy.');
+      }
     }
   });
 
