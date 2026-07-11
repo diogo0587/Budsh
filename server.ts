@@ -214,8 +214,13 @@ async function startServer() {
         let match;
         
         while ((match = cardRegex.exec(html)) !== null) {
-          const url = match[1];
+          const rawUrl = match[1];
           const innerHtml = match[2];
+          
+          let url = rawUrl;
+          if (rawUrl.startsWith('/')) {
+            url = `https://balbums.st${rawUrl}`;
+          }
           
           // Extract ID from URL
           let id = '';
@@ -390,40 +395,99 @@ Para cada álbum, você deve gerar:
     }
 
     // 4. Default Offline Search Fallback:
-    console.log(`[Search-Fallback] Adaptando álbuns offline para responder à busca`);
-    const customizedFallback = DEFAULT_ALBUMS.map((album, idx) => {
-      const formattedTerm = query.charAt(0).toUpperCase() + query.slice(1);
-      let newTitle = '';
-      let newId = `${album.id}-${queryLower}`;
-      let newTags = [...album.tags, formattedTerm];
+    console.log(`[Search-Fallback] Gerando álbuns temáticos dinâmicos offline para responder à busca: "${query}"`);
+    
+    const formattedTerm = query.charAt(0).toUpperCase() + query.slice(1);
+    const hosts = ['Bunkr.si', 'Pixeldrain', 'Cyberdrop'];
+    const addDates = ['Há 5 minutos', 'Há 20 minutos', 'Há 1 hora', 'Há 3 horas', 'Ontem', 'Há 2 dias', 'Há 5 dias'];
+    
+    const picsumIds = [
+      1015, 1016, 1025, 1035, 1043, 1062, 1069, 1084, 111, 124, 237, 342, 453, 564, 675, 718, 839, 946, 1011, 1012, 1013, 1021, 1022, 1024, 1032, 1033
+    ];
+
+    const unsplashTopics = [
+      'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=400&h=300&fit=crop', // portrait
+      'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?w=400&h=300&fit=crop', // model
+      'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=400&h=300&fit=crop', // man
+      'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=400&h=300&fit=crop', // woman
+      'https://images.unsplash.com/photo-1517841905240-472988babdf9?w=400&h=300&fit=crop', // selfie
+      'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?w=400&h=300&fit=crop', // model
+      'https://images.unsplash.com/photo-1531746020798-e6953c6e8e04?w=400&h=300&fit=crop', // portrait
+      'https://images.unsplash.com/photo-1544005313-94ddf0286df2?w=400&h=300&fit=crop', // model
+      'https://images.unsplash.com/photo-1508214751196-bcfd4ca60f91?w=400&h=300&fit=crop'  // woman
+    ];
+
+    const videoUrls = [
+      'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4',
+      'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4',
+      'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerFun.mp4',
+      'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4',
+      'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerMeltdowns.mp4',
+      'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/Sintel.mp4',
+      'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4'
+    ];
+
+    const customizedFallback = [];
+    const numAlbums = 6;
+
+    for (let i = 0; i < numAlbums; i++) {
+      // Create a unique seed per album using string hashing or simple index offset
+      const albumSeed = Math.abs(query.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0) + i * 43 + Math.floor(Math.random() * 10));
       
-      if (idx % 3 === 0) {
-        newTitle = `${formattedTerm} - Premium Album Leaks`;
-      } else if (idx % 3 === 1) {
-        newTitle = `${formattedTerm} - Bunkr Private Folder Pack`;
-      } else {
-        newTitle = `Exclusive Files of ${formattedTerm} (Photos & Vlogs)`;
+      let albumTitle = '';
+      if (i === 0) albumTitle = `${formattedTerm} - OnlyFans VIP Collection (Private Leak)`;
+      else if (i === 1) albumTitle = `${formattedTerm} - Ensaio Fotográfico Exclusivo e Vlogs`;
+      else if (i === 2) albumTitle = `${formattedTerm} - Conteúdo de Redes Sociais e TikToks`;
+      else if (i === 3) albumTitle = `Vazamentos Recentes de ${formattedTerm} (VIP Folder)`;
+      else if (i === 4) albumTitle = `${formattedTerm} - Fotos de Viagem e Selfies Raras`;
+      else albumTitle = `Melhores Momentos de ${formattedTerm} (Compilação Completa)`;
+
+      const host = hosts[albumSeed % hosts.length];
+      const addedDate = addDates[(albumSeed + i) % addDates.length];
+      const itemsCount = 8 + (albumSeed % 10); // between 8 and 17 files
+      
+      const thumbnail = unsplashTopics[albumSeed % unsplashTopics.length];
+      const tags = ['OnlyFans', 'Premium', host.replace('.si', ''), formattedTerm];
+
+      const files = [];
+      for (let j = 0; j < itemsCount; j++) {
+        const fileSeed = albumSeed + j * 17;
+        const isVideo = j % 3 === 0; // 1 out of 3 files is video
+        
+        if (isVideo) {
+          const videoUrl = videoUrls[fileSeed % videoUrls.length];
+          const fileNum = String(Math.floor(j / 3) + 1).padStart(2, '0');
+          files.push({
+            name: `${queryLower}_video_vlog_${fileNum}.mp4`,
+            url: videoUrl,
+            type: 'video'
+          });
+        } else {
+          const picsumId = picsumIds[fileSeed % picsumIds.length];
+          const imgUrl = `https://picsum.photos/id/${picsumId}/800/600`;
+          const fileNum = String(j - Math.floor(j / 3) + 1).padStart(2, '0');
+          files.push({
+            name: `${queryLower}_photo_session_${fileNum}.jpg`,
+            url: imgUrl,
+            type: 'image'
+          });
+        }
       }
 
-      const newFiles = album.files.map((file, fIdx) => {
-        const ext = file.type === 'video' ? 'mp4' : 'jpg';
-        return {
-          name: `${queryLower}_media_file_0${fIdx + 1}.${ext}`,
-          url: file.url,
-          type: file.type
-        };
+      customizedFallback.push({
+        id: `dyn_album_${queryLower}_${i}_${albumSeed}`,
+        title: albumTitle,
+        url: `https://bunkr.si/a/${queryLower}-album-${i}`,
+        itemsCount,
+        addedDate,
+        host,
+        tags,
+        thumbnail,
+        files
       });
+    }
 
-      return {
-        ...album,
-        id: newId,
-        title: newTitle,
-        tags: newTags,
-        files: newFiles
-      };
-    });
-
-    res.json(customizedFallback.slice(0, 6));
+    res.json(customizedFallback);
   });
 
   // Helper to rewrite old or dead Bunkr domains to the active working domain (bunkr.si)
@@ -453,8 +517,8 @@ Para cada álbum, você deve gerar:
     return trimmed;
   };
 
-  // Helper function to perform HTTP/HTTPS requests with user agent
-  const fetchPage = (targetUrl: string): Promise<{ html: string; statusCode: number; headers: any }> => {
+  // Helper function to perform HTTP/HTTPS requests with user agent (Direct fallback)
+  const fetchPageDirect = (targetUrl: string): Promise<{ html: string; statusCode: number; headers: any }> => {
     return new Promise((resolve, reject) => {
       try {
         const rewrittenUrl = rewriteBunkrUrl(targetUrl);
@@ -500,6 +564,69 @@ Para cada álbum, você deve gerar:
         req.end();
       } catch (error) {
         reject(error);
+      }
+    });
+  };
+
+  // Helper function to perform HTTP/HTTPS requests with user agent, routing through corsproxy.io
+  const fetchPage = (targetUrl: string): Promise<{ html: string; statusCode: number; headers: any }> => {
+    return new Promise((resolve, reject) => {
+      try {
+        const rewrittenUrl = rewriteBunkrUrl(targetUrl);
+        const proxyUrl = `https://corsproxy.io/?key=fe647f89&url=${encodeURIComponent(rewrittenUrl)}`;
+        const parsedUrl = new URL(proxyUrl);
+        
+        console.log(`[CORS Proxy] Encaminhando requisição de ${rewrittenUrl} via corsproxy.io`);
+        
+        const options: https.RequestOptions = {
+          hostname: parsedUrl.hostname,
+          path: parsedUrl.pathname + parsedUrl.search,
+          method: 'GET',
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9,pt-BR;q=0.8,pt;q=0.7',
+          },
+          timeout: 15000,
+          rejectUnauthorized: false,
+        };
+
+        const req = https.request(options, (res) => {
+          let chunks: any[] = [];
+          res.on('data', (chunk) => chunks.push(chunk));
+          res.on('end', () => {
+            const buffer = Buffer.concat(chunks);
+            const html = buffer.toString('utf-8');
+            
+            // If proxy returns an error code and the response doesn't look like bunkr/balbums, fallback to direct
+            if (res.statusCode && res.statusCode >= 400 && !html.includes('bunkr') && !html.includes('balbums')) {
+              console.warn(`[CORS Proxy] Status de erro do proxy: ${res.statusCode}. Tentando requisição direta.`);
+              fetchPageDirect(targetUrl).then(resolve).catch(reject);
+            } else {
+              resolve({
+                html,
+                statusCode: res.statusCode || 200,
+                headers: res.headers,
+              });
+            }
+          });
+        });
+
+        req.on('error', (err) => {
+          console.warn('[CORS Proxy] Falha na conexão com o proxy, usando requisição direta:', err.message);
+          fetchPageDirect(targetUrl).then(resolve).catch(reject);
+        });
+
+        req.on('timeout', () => {
+          req.destroy();
+          console.warn('[CORS Proxy] Tempo limite excedido no proxy, usando requisição direta.');
+          fetchPageDirect(targetUrl).then(resolve).catch(reject);
+        });
+
+        req.end();
+      } catch (error) {
+        console.warn('[CORS Proxy Error] Falha de inicialização, usando requisição direta:', error);
+        fetchPageDirect(targetUrl).then(resolve).catch(reject);
       }
     });
   };
@@ -702,6 +829,173 @@ Para cada álbum, você deve gerar:
     } catch (e: any) {
       console.error('[Proxy Init Error]', e);
       res.status(500).send('URL inválida.');
+    }
+  });
+
+  // Endpoint 3: HTML webview proxy server to bypass CORS and Same-Origin policy
+  app.get('/api/proxy-html', async (req, res) => {
+    const targetUrl = req.query.url as string;
+    if (!targetUrl) {
+      res.status(400).send('Parâmetro URL é obrigatório.');
+      return;
+    }
+
+    try {
+      console.log(`[HTML Proxy] Buscando URL: ${targetUrl}`);
+      const { html, statusCode } = await fetchPage(targetUrl);
+
+      if (statusCode === 403 || statusCode === 503 || html.includes('cloudflare') || html.includes('Cloudflare')) {
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.send(`
+          <!DOCTYPE html>
+          <html>
+            <head>
+              <meta charset="utf-8">
+              <style>
+                body { 
+                  background: #090d16; 
+                  color: #94a3b8; 
+                  font-family: system-ui, -apple-system, sans-serif; 
+                  display: flex; 
+                  flex-direction: column; 
+                  align-items: center; 
+                  justify-content: center; 
+                  height: 100vh; 
+                  margin: 0; 
+                  text-align: center; 
+                  padding: 24px;
+                  box-sizing: border-box;
+                }
+                .card {
+                  background: #0f172a;
+                  border: 1px solid #1e293b;
+                  padding: 32px;
+                  border-radius: 20px;
+                  max-width: 480px;
+                  box-shadow: 0 10px 25px -5px rgba(0,0,0,0.5);
+                }
+                h1 { color: #f43f5e; font-size: 20px; margin-top: 0; }
+                p { font-size: 13px; line-height: 1.6; color: #94a3b8; margin: 16px 0; }
+                .btn {
+                  display: inline-block;
+                  background: #4f46e5;
+                  color: #ffffff;
+                  font-size: 12px;
+                  font-weight: bold;
+                  text-decoration: none;
+                  padding: 10px 20px;
+                  border-radius: 12px;
+                  transition: background 0.2s;
+                }
+                .btn:hover { background: #4338ca; }
+              </style>
+            </head>
+            <body>
+              <div class="card">
+                <span style="font-size: 40px;">🛡️</span>
+                <h1>Bloqueio do Cloudflare Detectado</h1>
+                <p>Infelizmente, o Cloudflare bloqueou o servidor de acessar esta página diretamente.</p>
+                <p>Mas não se preocupe! Você ainda pode extrair o álbum instantaneamente usando a aba <strong>Auto-Captura ⚡</strong> (com nosso Favorito/Bookmarklet de 1 clique) ou colando o HTML manualmente.</p>
+              </div>
+            </body>
+          </html>
+        `);
+        return;
+      }
+
+      // Rewrite URLs inside the HTML page
+      const parsedUrl = new URL(targetUrl);
+      const baseUrl = parsedUrl.origin;
+      let rewrittenHtml = html;
+
+      // Ensure relative references load correctly via a <base> tag
+      if (!rewrittenHtml.includes('<base href=')) {
+        rewrittenHtml = rewrittenHtml.replace('<head>', `<head><base href="${baseUrl}/">`);
+      }
+
+      // Inject script to handle postMessage extraction and link click intercepting
+      const injectionScript = `
+        <script>
+          // Send HTML to parent once DOM is ready
+          function sendHtmlToParent() {
+            try {
+              window.parent.postMessage({
+                type: 'PROXY_LOADED',
+                html: document.documentElement.outerHTML,
+                url: ${JSON.stringify(targetUrl)}
+              }, '*');
+            } catch (err) {
+              console.error('Failed to postMessage', err);
+            }
+          }
+
+          if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', sendHtmlToParent);
+          } else {
+            sendHtmlToParent();
+          }
+
+          // Intercept links to keep them inside the proxy sandbox
+          document.addEventListener('click', (e) => {
+            const link = e.target.closest('a');
+            if (link && link.href) {
+              const targetHref = link.href;
+              if (targetHref.startsWith('http://') || targetHref.startsWith('https://')) {
+                // If the link points to bunkr or balbums, proxy it!
+                if (targetHref.includes('bunkr') || targetHref.includes('balbums')) {
+                  e.preventDefault();
+                  window.location.href = window.parent.location.origin + '/api/proxy-html?url=' + encodeURIComponent(targetHref);
+                }
+              }
+            }
+          });
+        </script>
+      `;
+
+      // Insert our script before the closing body tag
+      if (rewrittenHtml.includes('</body>')) {
+        rewrittenHtml = rewrittenHtml.replace('</body>', `${injectionScript}</body>`);
+      } else {
+        rewrittenHtml += injectionScript;
+      }
+
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.send(rewrittenHtml);
+
+    } catch (error: any) {
+      console.error('[Proxy HTML Error]', error);
+      res.status(500).send(`Erro ao buscar página: ${error.message}`);
+    }
+  });
+
+  // Bookmarklet automated HTML capture states and endpoints
+  let lastCapturedAlbum: { html: string; url: string; title: string; timestamp: number } | null = null;
+
+  app.post('/api/bookmarklet-receive', (req, res) => {
+    const { html, url, title } = req.body;
+    if (!html) {
+      res.status(400).json({ error: 'HTML é obrigatório.' });
+      return;
+    }
+
+    console.log(`[Bookmarklet] Recebido álbum de URL: ${url}, título: ${title}`);
+    lastCapturedAlbum = {
+      html,
+      url: url || '',
+      title: title || '',
+      timestamp: Date.now()
+    };
+
+    res.json({ success: true, message: 'Conteúdo capturado com sucesso!' });
+  });
+
+  app.get('/api/bookmarklet-poll', (_req, res) => {
+    if (lastCapturedAlbum && Date.now() - lastCapturedAlbum.timestamp < 120000) {
+      const temp = lastCapturedAlbum;
+      lastCapturedAlbum = null; // Consume it so we don't fetch it repeatedly
+      res.json({ captured: true, data: temp });
+    } else {
+      res.json({ captured: false });
     }
   });
 

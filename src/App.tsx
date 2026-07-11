@@ -26,7 +26,10 @@ import {
   Eye,
   ChevronRight,
   SlidersHorizontal,
-  Clipboard
+  Clipboard,
+  Check,
+  Globe,
+  ArrowLeft
 } from 'lucide-react';
 import JSZip from 'jszip';
 import confetti from 'canvas-confetti';
@@ -90,14 +93,21 @@ export default function App() {
   const [searchIsLoading, setSearchIsLoading] = useState(false);
   const [trendingAlbums, setTrendingAlbums] = useState<any[]>([]);
 
-  // Tabs within the Import panel: 'url' | 'html' | 'saved' | 'help'
-  const [activeTab, setActiveTab] = useState<'url' | 'html' | 'saved' | 'help'>('url');
+  // Tabs within the Import panel: 'url' | 'html' | 'saved' | 'help' | 'bookmarklet' | 'webview'
+  const [activeTab, setActiveTab] = useState<'url' | 'html' | 'saved' | 'help' | 'bookmarklet' | 'webview'>('url');
 
   // Input states
   const [inputUrl, setInputUrl] = useState('');
   const [pastedHtml, setPastedHtml] = useState('');
   const [clipboardStatus, setClipboardStatus] = useState<'idle' | 'success' | 'empty' | 'error'>('idle');
-  const [customAlbumTitle, setCustomAlbumTitle] = useState('Novo Álbum Customizado');
+  const [customAlbumTitle, setCustomAlbumTitle] = useState('');
+
+  // Integrated Same-Origin Webview Scraper States
+  const [webviewInputUrl, setWebviewInputUrl] = useState('https://bunkr.si');
+  const [activeWebviewUrl, setActiveWebviewUrl] = useState('');
+  const [webviewMediaItems, setWebviewMediaItems] = useState<MediaItem[]>([]);
+  const [webviewAlbumTitle, setWebviewAlbumTitle] = useState('');
+  const [isWebviewLoading, setIsWebviewLoading] = useState(false);
 
   // Album Data
   const [albumTitle, setAlbumTitle] = useState('');
@@ -105,6 +115,7 @@ export default function App() {
   const [mediaItems, setMediaItems] = useState<MediaItem[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
+  const [successMessage, setSuccessMessage] = useState('');
   const [cloudflareBlock, setCloudflareBlock] = useState(false);
 
   // Filters and Selection
@@ -221,6 +232,198 @@ export default function App() {
     }
   }, [activeTab]);
 
+  // Poll for bookmarklet automatic capture every 2 seconds
+  useEffect(() => {
+    let intervalId: any;
+    
+    const checkCapturedAlbum = async () => {
+      try {
+        const res = await fetch('/api/bookmarklet-poll');
+        if (res.ok) {
+          const data = await res.json();
+          if (data.captured && data.data) {
+            const { html, url, title } = data.data;
+            console.log('[App] Álbum capturado automaticamente detectado!', title);
+            parseHtmlAndSetAlbum(html, title, url);
+            
+            // Set success feedback message
+            setSuccessMessage(`Álbum "${title}" capturado e importado com sucesso diretamente do seu navegador!`);
+            setTimeout(() => setSuccessMessage(''), 8000);
+          }
+        }
+      } catch (err) {
+        // Fail silently in the background
+      }
+    };
+
+    intervalId = setInterval(checkCapturedAlbum, 2000);
+    return () => clearInterval(intervalId);
+  }, []);
+
+  // Listen for message events from our same-origin webview iframe proxy
+  useEffect(() => {
+    const handleWebviewMessage = (event: MessageEvent) => {
+      if (event.data && event.data.type === 'PROXY_LOADED') {
+        const { html, url } = event.data;
+        console.log('[App Webview] Conteúdo capturado via proxy-html!', url);
+        setIsWebviewLoading(false);
+        extractMediaFromHtml(html, url);
+      }
+    };
+
+    window.addEventListener('message', handleWebviewMessage);
+    return () => window.removeEventListener('message', handleWebviewMessage);
+  }, []);
+
+  // Extract media items specifically for the Webview Sandbox panel
+  const extractMediaFromHtml = (htmlText: string, originalUrl: string) => {
+    try {
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(htmlText, 'text/html');
+
+      // Attempt to extract title
+      let extractedTitle = doc.querySelector('title')?.textContent?.replace(' - Bunkr', '').replace(' - BAlbums', '').trim() || 
+                           doc.querySelector('h1')?.textContent?.trim() || 
+                           doc.querySelector('.album-title')?.textContent?.trim() || 
+                           '';
+
+      const items: MediaItem[] = [];
+      const seenUrls = new Set<string>();
+
+      // Try to determine the base URL of the original page to resolve relative paths
+      let detectedBaseUrl = 'https://bunkr.si';
+      if (originalUrl) {
+        try {
+          detectedBaseUrl = new URL(originalUrl).origin;
+          setActiveWebviewUrl(originalUrl);
+        } catch (e) {}
+      }
+
+      const canonical = doc.querySelector('link[rel="canonical"]')?.getAttribute('href') ||
+                        doc.querySelector('meta[property="og:url"]')?.getAttribute('content');
+      
+      if (canonical && (canonical.startsWith('http://') || canonical.startsWith('https://'))) {
+        try {
+          const u = new URL(canonical);
+          detectedBaseUrl = u.origin;
+        } catch (e) {}
+      }
+
+      // Strategy 1: Look for bunkr-style or general file grid items
+      const links = doc.querySelectorAll('a');
+      links.forEach((link, idx) => {
+        const href = link.getAttribute('href');
+        if (!href || href.startsWith('javascript:') || href.startsWith('#')) return;
+
+        // Clean and resolve href
+        let absoluteUrl = href;
+        if (href.startsWith('//')) {
+          absoluteUrl = 'https:' + href;
+        } else if (href.startsWith('/')) {
+          absoluteUrl = detectedBaseUrl + href;
+        } else if (!href.startsWith('http://') && !href.startsWith('https://')) {
+          absoluteUrl = detectedBaseUrl + '/' + href;
+        }
+
+        absoluteUrl = rewriteBunkrUrl(absoluteUrl);
+        const lowerHref = absoluteUrl.toLowerCase();
+        
+        // Is it a direct media file, or a viewing page?
+        const isMediaFile = /\.(mp4|mkv|mov|webm|avi|jpg|jpeg|png|webp|gif|mp3|wav|ogg)$/.test(lowerHref);
+        const isViewPage = /\/(v|i)\/[a-zA-Z0-9]+/.test(lowerHref);
+
+        if (isMediaFile || isViewPage) {
+          if (seenUrls.has(absoluteUrl)) return;
+          seenUrls.add(absoluteUrl);
+
+          // Find file name from child image alt, title attribute or link text
+          let name = '';
+          const imgChild = link.querySelector('img');
+          if (imgChild) {
+            name = imgChild.getAttribute('alt') || imgChild.getAttribute('title') || '';
+          }
+          if (!name) {
+            name = link.getAttribute('title') || link.textContent?.trim() || '';
+          }
+          if (!name) {
+            try {
+              const parts = absoluteUrl.split('/');
+              name = parts[parts.length - 1] || `file_${idx}`;
+            } catch (e) {
+              name = `file_${idx}`;
+            }
+          }
+
+          // Determine type
+          const type = /\.(mp4|mkv|mov|webm|avi)$/.test(lowerHref) || (isViewPage && lowerHref.includes('/v/')) ? 'video' : 'image';
+
+          items.push({
+            id: `webview_item_${idx}_${Math.random().toString(36).substr(2, 5)}`,
+            url: absoluteUrl,
+            name: name,
+            type: type,
+            size: 'Desconhecido',
+            isResolved: isMediaFile
+          });
+        }
+      });
+
+      // Strategy 2: Direct video tags
+      const videos = doc.querySelectorAll('video source, video');
+      videos.forEach((vid, idx) => {
+        const src = vid.getAttribute('src');
+        if (!src) return;
+
+        let absoluteUrl = src;
+        if (src.startsWith('//')) {
+          absoluteUrl = 'https:' + src;
+        } else if (src.startsWith('/')) {
+          absoluteUrl = detectedBaseUrl + src;
+        } else if (!src.startsWith('http://') && !src.startsWith('https://')) {
+          absoluteUrl = detectedBaseUrl + '/' + src;
+        }
+
+        absoluteUrl = rewriteBunkrUrl(absoluteUrl);
+
+        if (seenUrls.has(absoluteUrl)) return;
+        seenUrls.add(absoluteUrl);
+
+        items.push({
+          id: `webview_vid_${idx}_${Math.random().toString(36).substr(2, 5)}`,
+          url: absoluteUrl,
+          name: `video_${idx + 1}.mp4`,
+          type: 'video',
+          size: 'Desconhecido',
+          isResolved: true
+        });
+      });
+
+      // Fallback title deriving
+      let finalTitle = extractedTitle;
+      if (!finalTitle && items.length > 0) {
+        const firstFileName = items[0].name;
+        let cleanName = firstFileName.replace(/\.[a-zA-Z0-9]{2,4}$/, '')
+                                     .replace(/[-_]\d+$/, '')
+                                     .replace(/\d+$/, '')
+                                     .replace(/[-_]/g, ' ')
+                                     .trim();
+        cleanName = cleanName.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+        if (cleanName && cleanName.length > 3) {
+          finalTitle = `Álbum - ${cleanName}`;
+        }
+      }
+
+      if (!finalTitle) {
+        finalTitle = 'Álbum Importado via Webview';
+      }
+
+      setWebviewMediaItems(items);
+      setWebviewAlbumTitle(finalTitle);
+    } catch (error) {
+      console.error('Erro na extração do Webview:', error);
+    }
+  };
+
   // Handle Search on balbums.st
   const handleSearch = async (term: string) => {
     const cleanTerm = term.trim();
@@ -331,8 +534,60 @@ export default function App() {
     }
   };
 
+  // Generate the bookmarklet code with visual loader feedback and auto-fetch POST
+  const getBookmarkletCode = () => {
+    const code = `javascript:(function(){
+  const html = document.documentElement.outerHTML;
+  const currentUrl = window.location.href;
+  const title = document.title || "Álbum Extraído";
+  
+  const loader = document.createElement("div");
+  loader.style.position = "fixed";
+  loader.style.top = "20px";
+  loader.style.right = "20px";
+  loader.style.padding = "16px 24px";
+  loader.style.background = "#4f46e5";
+  loader.style.color = "#ffffff";
+  loader.style.fontFamily = "system-ui, -apple-system, sans-serif";
+  loader.style.fontSize = "13px";
+  loader.style.fontWeight = "bold";
+  loader.style.borderRadius = "16px";
+  loader.style.boxShadow = "0 20px 25px -5px rgba(0,0,0,0.5), 0 8px 10px -6px rgba(0,0,0,0.5)";
+  loader.style.border = "1px solid rgba(255,255,255,0.1)";
+  loader.style.zIndex = "9999999";
+  loader.style.transition = "all 0.3s ease";
+  loader.style.display = "flex";
+  loader.style.alignItems = "center";
+  loader.style.gap = "10px";
+  loader.innerHTML = '<svg style="animation: spin 1s linear infinite; width: 16px; height: 16px;" fill="none" viewBox="0 0 24 24"><circle style="opacity: 0.25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path style="opacity: 0.75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path><style>@keyframes spin { 100% { transform: rotate(360deg); } }</style></svg> ⚡ Enviando para o Visualizador...';
+  document.body.appendChild(loader);
+
+  fetch("${window.location.origin}/api/bookmarklet-receive", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ html: html, url: currentUrl, title: title })
+  })
+  .then(res => res.json())
+  .then(data => {
+    loader.style.background = "#10b981";
+    loader.innerHTML = '✅ Álbum importado com sucesso!';
+    setTimeout(() => { loader.remove(); }, 3000);
+  })
+  .catch(err => {
+    loader.style.background = "#ef4444";
+    loader.innerHTML = '❌ Erro de conexão!';
+    navigator.clipboard.writeText(html);
+    setTimeout(() => { 
+      loader.remove(); 
+      alert("Não foi possível conectar ao visualizador, mas o código HTML foi copiado para sua área de transferência (clipboard)!");
+    }, 1500);
+  });
+})();`;
+    return code;
+  };
+
   // Extract media items using client-side DOMParser (Extremely robust fallback)
-  const parseHtmlAndSetAlbum = (htmlText: string, titleHint = '') => {
+  const parseHtmlAndSetAlbum = (htmlText: string, titleHint = '', originalUrl = '') => {
     if (!htmlText.trim()) {
       setErrorMessage('Por favor, cole o código HTML válido.');
       return;
@@ -351,7 +606,7 @@ export default function App() {
                        doc.querySelector('h1')?.textContent?.trim() || 
                        doc.querySelector('.album-title')?.textContent?.trim() || 
                        titleHint || 
-                       'Álbum Extraído de HTML';
+                       '';
 
       const items: MediaItem[] = [];
       const seenUrls = new Set<string>();
@@ -546,8 +801,37 @@ export default function App() {
       }
 
       // Populate resolved items
-      setAlbumTitle(extractedTitle);
-      setAlbumSourceUrl('');
+      let finalTitle = extractedTitle;
+      if (!finalTitle || finalTitle === 'Novo Álbum Customizado' || finalTitle === 'Álbum Extraído de HTML') {
+        // Try to derive from the first file name!
+        if (items.length > 0) {
+          const firstFileName = items[0].name;
+          // Strip extension, numbers, and common prefix
+          let cleanName = firstFileName.replace(/\.[a-zA-Z0-9]{2,4}$/, '') // remove extension
+                                       .replace(/[-_]\d+$/, '') // remove trailing numbers
+                                       .replace(/\d+$/, '')
+                                       .replace(/[-_]/g, ' ') // replace dashes/underscores with spaces
+                                       .trim();
+          // Capitalize words
+          cleanName = cleanName.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+          if (cleanName && cleanName.length > 3) {
+            finalTitle = `Álbum - ${cleanName}`;
+          }
+        }
+      }
+      
+      if (!finalTitle) {
+        // Fallback to a timestamped name
+        const now = new Date();
+        const timeStr = now.toLocaleTimeString('pt-BR');
+        finalTitle = `Álbum Extraído às ${timeStr}`;
+      }
+
+      setAlbumTitle(finalTitle);
+      setAlbumSourceUrl(originalUrl || '');
+      if (originalUrl) {
+        setInputUrl(originalUrl);
+      }
       setMediaItems(items);
       setViewMode('viewer');
       
@@ -579,10 +863,10 @@ export default function App() {
       const response = await fetch(`/api/scrape?url=${encodeURIComponent(inputUrl)}`);
       const data = await response.json();
 
-      if (!response.ok) {
+      if (!response.ok || data.error) {
         if (data.error === 'CF_BLOCK') {
           setCloudflareBlock(true);
-          setErrorMessage(data.message);
+          setErrorMessage(data.message || 'Bloqueio do Cloudflare detectado. Por favor, utilize o método de copiar e colar o código HTML da página.');
           // Auto switch to HTML tab so user can paste
           setActiveTab('html');
         } else {
@@ -592,7 +876,7 @@ export default function App() {
         return;
       }
 
-      if (data.items.length === 0) {
+      if (!data.items || data.items.length === 0) {
         setErrorMessage('Não foram encontrados arquivos de mídia nesse link.');
         setIsLoading(false);
         return;
@@ -1026,6 +1310,21 @@ export default function App() {
             <button
               onClick={() => {
                 setViewMode('viewer');
+                setActiveTab('webview');
+              }}
+              id="nav-tab-webview"
+              className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all duration-200 ${
+                viewMode === 'viewer' && activeTab === 'webview'
+                  ? 'bg-indigo-600 text-white shadow'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/40'
+              }`}
+            >
+              <Globe className="h-3.5 w-3.5" />
+              Navegador Webview 🌐
+            </button>
+            <button
+              onClick={() => {
+                setViewMode('viewer');
                 setActiveTab('html');
               }}
               id="nav-tab-html"
@@ -1037,6 +1336,21 @@ export default function App() {
             >
               <Code className="h-3.5 w-3.5" />
               Colar Código HTML
+            </button>
+            <button
+              onClick={() => {
+                setViewMode('viewer');
+                setActiveTab('bookmarklet');
+              }}
+              id="nav-tab-bookmarklet"
+              className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all duration-200 ${
+                viewMode === 'viewer' && activeTab === 'bookmarklet'
+                  ? 'bg-gradient-to-r from-amber-500 to-indigo-600 text-white shadow-md'
+                  : 'text-amber-400/90 hover:text-slate-200 hover:bg-slate-900/40'
+              }`}
+            >
+              <Sparkles className="h-3.5 w-3.5 text-amber-400" />
+              Auto-Captura ⚡
             </button>
             <button
               onClick={() => {
@@ -1093,16 +1407,28 @@ export default function App() {
                   >
                     Ir para Colar HTML (Garantido)
                   </button>
-                  <a
-                    href={inputUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="bg-transparent hover:bg-rose-900/40 text-rose-300 text-[11px] font-semibold px-3 py-1.5 rounded-lg border border-rose-800/50 flex items-center gap-1 transition duration-150"
-                  >
-                    Abrir Álbum Original <ExternalLink className="h-3 w-3" />
-                  </a>
+                  {(albumSourceUrl || inputUrl) && (
+                    <a
+                      href={albumSourceUrl || inputUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="bg-transparent hover:bg-rose-900/40 text-rose-300 text-[11px] font-semibold px-3 py-1.5 rounded-lg border border-rose-800/50 flex items-center gap-1 transition duration-150"
+                    >
+                      Abrir Álbum Original <ExternalLink className="h-3 w-3" />
+                    </a>
+                  )}
                 </div>
               )}
+            </div>
+          </div>
+        )}
+
+        {successMessage && (
+          <div className="bg-emerald-950/40 border border-emerald-800/80 rounded-2xl p-4 flex gap-3 items-start animate-in fade-in slide-in-from-top-4 duration-300">
+            <Check className="h-5 w-5 text-emerald-400 shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <h4 className="text-sm font-bold text-emerald-300">Captura Automática</h4>
+              <p className="text-xs text-emerald-200/90 mt-1 leading-relaxed">{successMessage}</p>
             </div>
           </div>
         )}
@@ -1362,6 +1688,290 @@ export default function App() {
               </div>
             )}
           </div>
+        ) : activeTab === 'webview' ? (
+          /* EMBEDDED WEBVIEW SANDBOX AND SCRAPER */
+          <div className="flex flex-col gap-6 w-full max-w-7xl mx-auto animate-in fade-in duration-300">
+            {/* Header info bar */}
+            <div className="bg-slate-900/40 border border-slate-800/80 rounded-3xl p-6 shadow-xl relative overflow-hidden">
+              <div className="absolute top-0 right-0 w-48 h-48 bg-indigo-600/5 rounded-full blur-3xl -z-10"></div>
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <Globe className="h-5 w-5 text-indigo-400" />
+                    <h3 className="text-base font-bold text-slate-100">Navegador Webview Integrado (Safe Sandbox)</h3>
+                  </div>
+                  <p className="text-xs text-slate-400 leading-relaxed max-w-2xl">
+                    Navegue nos sites originais diretamente por aqui. O tráfego de rede é encapsulado de forma segura, permitindo que nosso sistema <strong>capture os arquivos de mídia automaticamente em tempo real</strong> sem violar políticas de segurança do navegador (CORS/Same-Origin Bypass).
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2 shrink-0">
+                  <span className="bg-indigo-500/10 text-indigo-400 text-[10px] border border-indigo-500/20 px-3 py-1 rounded-full font-bold uppercase tracking-wider">
+                    Same-Origin Proxy Active 🌐
+                  </span>
+                  <span className="bg-amber-500/10 text-amber-400 text-[10px] border border-amber-500/20 px-3 py-1 rounded-full font-bold uppercase tracking-wider">
+                    Bypass Inteligente ⚡
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
+              
+              {/* Left Side: Mock Browser Panel (8 Columns) */}
+              <div className="lg:col-span-8 flex flex-col bg-slate-900/40 border border-slate-800/80 rounded-3xl overflow-hidden shadow-xl">
+                
+                {/* Browser address bar and controls */}
+                <div className="bg-slate-950 p-4 border-b border-slate-850 flex items-center gap-3">
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {/* Mock Navigation Arrows */}
+                    <button 
+                      onClick={() => {
+                        // Simply reloads/goes back home
+                        setActiveWebviewUrl('https://bunkr.si');
+                      }}
+                      className="p-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white transition"
+                      title="Voltar ao início"
+                    >
+                      <ArrowLeft className="h-3.5 w-3.5" />
+                    </button>
+                    <button 
+                      onClick={() => {
+                        // Refresh the iframe
+                        const temp = activeWebviewUrl;
+                        setActiveWebviewUrl('');
+                        setTimeout(() => {
+                          if (temp) setActiveWebviewUrl(temp);
+                        }, 50);
+                      }}
+                      className="p-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white transition"
+                      title="Atualizar Página"
+                    >
+                      <RefreshCw className={`h-3.5 w-3.5 ${isWebviewLoading ? 'animate-spin text-indigo-400' : ''}`} />
+                    </button>
+                  </div>
+
+                  {/* Address input */}
+                  <div className="flex-1 relative flex items-center">
+                    <Globe className="h-3.5 w-3.5 text-slate-600 absolute left-3 pointer-events-none" />
+                    <input
+                      type="text"
+                      value={webviewInputUrl}
+                      onChange={(e) => setWebviewInputUrl(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          let finalUrl = webviewInputUrl.trim();
+                          if (!finalUrl.startsWith('http://') && !finalUrl.startsWith('https://')) {
+                            finalUrl = 'https://' + finalUrl;
+                            setWebviewInputUrl(finalUrl);
+                          }
+                          setIsWebviewLoading(true);
+                          setActiveWebviewUrl(finalUrl);
+                        }
+                      }}
+                      placeholder="Insira a URL do álbum (ex: bunkr.si ou balbums.st)"
+                      className="w-full bg-slate-900 border border-slate-800 rounded-xl py-2 pl-9 pr-24 text-xs text-slate-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 transition font-mono"
+                    />
+                    <div className="absolute right-2 flex items-center gap-1">
+                      <button
+                        onClick={() => {
+                          let finalUrl = webviewInputUrl.trim();
+                          if (!finalUrl.startsWith('http://') && !finalUrl.startsWith('https://')) {
+                            finalUrl = 'https://' + finalUrl;
+                            setWebviewInputUrl(finalUrl);
+                          }
+                          setIsWebviewLoading(true);
+                          setActiveWebviewUrl(finalUrl);
+                        }}
+                        className="bg-indigo-600 hover:bg-indigo-500 text-white font-extrabold text-[10px] px-3 py-1.5 rounded-lg transition"
+                      >
+                        Navegar
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Sub-status header bar */}
+                {activeWebviewUrl && (
+                  <div className="bg-slate-950/40 px-4 py-2 border-b border-slate-850/60 flex items-center justify-between text-[10px] text-slate-500 font-mono">
+                    <span className="truncate max-w-md">URL Atual: <span className="text-slate-400">{activeWebviewUrl}</span></span>
+                    <span className="flex items-center gap-1 shrink-0">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                      Sandbox Ativa
+                    </span>
+                  </div>
+                )}
+
+                {/* Simulated Iframe Stage */}
+                <div className="flex-1 bg-slate-950 min-h-[550px] relative">
+                  {activeWebviewUrl ? (
+                    <iframe
+                      src={`/api/proxy-html?url=${encodeURIComponent(activeWebviewUrl)}`}
+                      className="w-full h-full min-h-[550px] bg-slate-950 border-0"
+                      onLoad={() => setIsWebviewLoading(false)}
+                      referrerPolicy="no-referrer"
+                    />
+                  ) : (
+                    /* Initial browser landing helper */
+                    <div className="absolute inset-0 flex flex-col items-center justify-center text-center p-8 gap-6 bg-slate-950">
+                      <div className="p-4 bg-slate-900 border border-slate-800 rounded-full text-indigo-400 animate-pulse">
+                        <Globe className="h-8 w-8" />
+                      </div>
+                      <div className="space-y-1.5 max-w-sm">
+                        <h4 className="text-sm font-bold text-slate-200">Pronto para Carregar</h4>
+                        <p className="text-xs text-slate-500 leading-relaxed">
+                          Digite qualquer URL de álbum acima (Bunkr ou BAlbums) e clique em navegar. O sistema abrirá a página de forma interativa.
+                        </p>
+                      </div>
+
+                      {/* Quick links */}
+                      <div className="grid grid-cols-2 gap-3 w-full max-w-md">
+                        <div
+                          onClick={() => {
+                            const url = 'https://bunkr.si';
+                            setWebviewInputUrl(url);
+                            setActiveWebviewUrl(url);
+                            setIsWebviewLoading(true);
+                          }}
+                          className="bg-slate-900/60 hover:bg-slate-900 border border-slate-850 hover:border-slate-800 p-3.5 rounded-xl cursor-pointer transition text-left"
+                        >
+                          <span className="text-[9px] uppercase font-bold text-slate-500">Site Oficial</span>
+                          <h5 className="text-xs font-bold text-slate-200 mt-1">Bunkr.si</h5>
+                          <p className="text-[10px] text-slate-600 mt-0.5 leading-normal">Página inicial do maior portal de arquivos digitais.</p>
+                        </div>
+                        <div
+                          onClick={() => {
+                            const url = 'https://balbums.st';
+                            setWebviewInputUrl(url);
+                            setActiveWebviewUrl(url);
+                            setIsWebviewLoading(true);
+                          }}
+                          className="bg-slate-900/60 hover:bg-slate-900 border border-slate-850 hover:border-slate-800 p-3.5 rounded-xl cursor-pointer transition text-left"
+                        >
+                          <span className="text-[9px] uppercase font-bold text-indigo-500">Diretório</span>
+                          <h5 className="text-xs font-bold text-slate-200 mt-1">BAlbums.st</h5>
+                          <p className="text-[10px] text-slate-600 mt-0.5 leading-normal">Explore o acervo completo de álbuns compartilhados.</p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Browser Spinner Overlay */}
+                  {isWebviewLoading && (
+                    <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm flex flex-col items-center justify-center gap-3">
+                      <RefreshCw className="h-8 w-8 text-indigo-500 animate-spin" />
+                      <p className="text-xs font-bold text-slate-400 font-mono">Bypassando Cloudflare & Carregando...</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Right Side: Extraction Monitor Panel (4 Columns) */}
+              <div className="lg:col-span-4 flex flex-col bg-slate-900/40 border border-slate-800/80 rounded-3xl p-5 shadow-xl justify-between">
+                <div className="flex flex-col gap-4">
+                  <div className="flex items-center justify-between border-b border-slate-850 pb-3">
+                    <div className="flex items-center gap-2">
+                      <Sparkles className="h-4 w-4 text-indigo-400" />
+                      <h4 className="text-xs font-black uppercase tracking-wider text-slate-300">Captura em Tempo Real</h4>
+                    </div>
+                    {webviewMediaItems.length > 0 && (
+                      <span className="bg-emerald-500/10 text-emerald-400 text-[9px] font-bold px-2 py-0.5 rounded-full border border-emerald-500/20">
+                        {webviewMediaItems.length} Arquivos
+                      </span>
+                    )}
+                  </div>
+
+                  {webviewMediaItems.length === 0 ? (
+                    <div className="text-center p-8 border border-dashed border-slate-850 rounded-2xl flex flex-col items-center justify-center gap-3 min-h-[300px]">
+                      <span className="text-3xl animate-pulse">📡</span>
+                      <div>
+                        <h5 className="text-xs font-bold text-slate-300">Aguardando Navegação</h5>
+                        <p className="text-[10px] text-slate-500 leading-relaxed mt-1">
+                          Navegue até a página de qualquer álbum no painel ao lado. Nosso scraper interceptará os arquivos instantaneamente!
+                        </p>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col gap-4">
+                      {/* Album details */}
+                      <div className="bg-slate-950/60 p-4 rounded-2xl border border-slate-850/80 space-y-1">
+                        <span className="text-[9px] uppercase font-bold text-indigo-400 tracking-wider">Álbum Capturado</span>
+                        <h5 className="text-xs font-bold text-slate-200 leading-snug line-clamp-2">{webviewAlbumTitle}</h5>
+                        <p className="text-[9px] font-mono text-slate-500 truncate" title={activeWebviewUrl}>
+                          {activeWebviewUrl}
+                        </p>
+                      </div>
+
+                      {/* File preview stream list */}
+                      <div>
+                        <label className="text-[10px] uppercase tracking-wider font-extrabold text-slate-500 block mb-2">Lista de Arquivos Detectados</label>
+                        <div className="space-y-1.5 max-h-[280px] overflow-y-auto pr-1">
+                          {webviewMediaItems.map((item) => (
+                            <div 
+                              key={item.id}
+                              className="bg-slate-950/40 border border-slate-850/60 hover:border-slate-800 p-2 rounded-xl flex items-center justify-between gap-2.5 transition"
+                            >
+                              <div className="flex items-center gap-2 min-w-0 flex-1">
+                                <span className="text-xs shrink-0">
+                                  {item.type === 'video' ? '🎥' : '🖼️'}
+                                </span>
+                                <p className="text-[10px] font-mono text-slate-300 truncate" title={item.name}>
+                                  {item.name}
+                                </p>
+                              </div>
+                              <span className="text-[9px] text-slate-600 bg-slate-900 border border-slate-850 px-1.5 py-0.5 rounded uppercase shrink-0 font-bold tracking-wider">
+                                {item.type}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Import triggers */}
+                {webviewMediaItems.length > 0 && (
+                  <div className="pt-4 border-t border-slate-850 mt-6 flex flex-col gap-3 font-sans">
+                    <div className="text-[10px] text-slate-400 leading-normal bg-indigo-950/20 border border-indigo-900/30 rounded-xl p-3 flex gap-2 items-start">
+                      <span className="text-xs">💡</span>
+                      <p>
+                        Clique no botão abaixo para carregar todos esses {webviewMediaItems.length} arquivos diretamente no nosso visualizador avançado para iniciar transmissões, pré-visualizações ou download em ZIP!
+                      </p>
+                    </div>
+
+                    <button
+                      onClick={() => {
+                        // Import all into main visualizer
+                        setMediaItems(webviewMediaItems);
+                        setAlbumTitle(webviewAlbumTitle);
+                        setAlbumSourceUrl(activeWebviewUrl);
+                        setInputUrl(activeWebviewUrl);
+                        setSelectedIds(new Set(webviewMediaItems.map(i => i.id)));
+                        setViewMode('viewer');
+                        setActiveTab('url');
+                        
+                        // Show beautiful feedback
+                        setSuccessMessage(`Álbum "${webviewAlbumTitle}" carregado com sucesso na Galeria de Visualização!`);
+                        setTimeout(() => setSuccessMessage(''), 8000);
+                        
+                        // Fire a fancy confetti celebration!
+                        confetti({
+                          particleCount: 100,
+                          spread: 70,
+                          origin: { y: 0.6 },
+                          colors: ['#4f46e5', '#818cf8', '#10b981', '#34d399']
+                        });
+                      }}
+                      className="w-full bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 text-white font-black text-xs py-3.5 px-4 rounded-2xl shadow-lg shadow-emerald-500/10 flex items-center justify-center gap-2 transition active:scale-[0.98] cursor-pointer"
+                    >
+                      <Sparkles className="h-4 w-4 animate-pulse" />
+                      <span>Importar para a Galeria!</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
         ) : (
           /* Main Tab Panels */
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
@@ -1442,9 +2052,27 @@ export default function App() {
                   <div className="bg-indigo-950/25 border border-indigo-900/40 rounded-xl p-3 text-[11px] text-slate-400 leading-relaxed flex items-start gap-2.5">
                     <span className="text-indigo-400 text-sm mt-0.5">💡</span>
                     <div>
-                      <strong className="text-indigo-300">Dica do Clipboard:</strong> Se você estiver usando o aplicativo no visualizador integrado (iframe), o navegador bloqueia a leitura automática do clipboard. <a href={window.location.href} target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:text-indigo-300 underline font-semibold transition inline-flex items-center gap-0.5">Clique aqui para Abrir em Nova Aba ↗</a> para habilitar o botão de colar de 1 clique, ou simplesmente use <kbd className="bg-slate-950 px-1 py-0.5 rounded text-indigo-400 border border-slate-800 text-[10px]">Ctrl+V</kbd> no campo de texto abaixo.
+                      <strong className="text-indigo-300">Dica do Clipboard:</strong> Se você estiver usando o aplicativo no visualizador integrado (iframe), o navegador bloqueia a leitura automática do clipboard. <a href={window.location.origin} target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:text-indigo-300 underline font-semibold transition inline-flex items-center gap-0.5">Clique aqui para Abrir em Nova Aba ↗</a> para habilitar o botão de colar de 1 clique, ou simplesmente use <kbd className="bg-slate-950 px-1 py-0.5 rounded text-indigo-400 border border-slate-800 text-[10px]">Ctrl+V</kbd> no campo de texto abaixo.
                     </div>
                   </div>
+
+                  {inputUrl && (
+                    <div className="bg-slate-950 border border-slate-850/80 rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-3 mt-1">
+                      <div className="text-left w-full sm:w-auto">
+                        <span className="text-[10px] font-bold text-indigo-400 uppercase tracking-wider block mb-0.5 font-mono">Link de Origem Detetado</span>
+                        <p className="text-xs text-slate-300 truncate max-w-xs md:max-w-md">{inputUrl}</p>
+                      </div>
+                      <a
+                        href={inputUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold px-4 py-2.5 rounded-xl flex items-center justify-center gap-1.5 transition shrink-0 w-full sm:w-auto"
+                      >
+                        <ExternalLink className="h-3.5 w-3.5" />
+                        Abrir Link para Copiar Código
+                      </a>
+                    </div>
+                  )}
 
                   <div className="space-y-1.5 mt-1">
                     <div className="flex items-center justify-between">
@@ -1502,6 +2130,76 @@ export default function App() {
                     <FileCode className="h-4 w-4" />
                     Processar Código HTML
                   </button>
+                </div>
+              )}
+
+              {/* Tab 5: Bookmarklet Auto-Capture */}
+              {activeTab === 'bookmarklet' && (
+                <div className="flex flex-col gap-4 animate-in fade-in duration-200">
+                  <div className="flex items-center gap-2">
+                    <Sparkles className="h-5 w-5 text-amber-400" />
+                    <h3 className="text-sm font-bold tracking-wide uppercase text-slate-300">Auto-Captura Inteligente</h3>
+                  </div>
+                  <span className="bg-amber-500/10 text-amber-400 text-[10px] border border-amber-500/20 px-2.5 py-1 rounded-full font-bold self-start uppercase tracking-wider">
+                    Cloudflare Bypass & 100% Automático ⚡
+                  </span>
+                  <p className="text-xs text-slate-400 leading-relaxed">
+                    Evite o trabalho de copiar e colar códigos HTML. Use o nosso <strong>Favorito Inteligente (Bookmarklet)</strong> para enviar qualquer página de álbum diretamente para cá com <strong>apenas 1 clique</strong>!
+                  </p>
+
+                  <div className="bg-slate-950 border border-slate-850/80 rounded-2xl p-5 flex flex-col items-center text-center gap-3 mt-1 shadow-inner">
+                    <span className="text-2xl animate-bounce">🖱️</span>
+                    <div>
+                      <h4 className="text-xs font-bold text-slate-200">Botão de Instalação</h4>
+                      <p className="text-[10px] text-slate-500 mt-1">Arraste o botão abaixo para a sua barra de favoritos do navegador:</p>
+                    </div>
+                    
+                    <a
+                      href={getBookmarkletCode()}
+                      onClick={(e) => {
+                        e.preventDefault();
+                        alert('Por favor, ARRASTE este botão para a sua Barra de Favoritos (pressione Ctrl+Shift+B para mostrar a barra no Chrome/Edge).');
+                      }}
+                      className="bg-gradient-to-r from-amber-500 via-orange-500 to-indigo-600 hover:from-amber-400 hover:to-indigo-500 text-white font-black text-xs px-5 py-3 rounded-xl cursor-grab shadow-lg shadow-amber-500/10 border border-white/10 select-none inline-flex items-center gap-1.5 transition active:scale-[0.98]"
+                      title="Arraste para sua barra de favoritos"
+                    >
+                      <Sparkles className="h-3.5 w-3.5 text-white" />
+                      <span>Capturar Álbum ⚡</span>
+                    </a>
+                  </div>
+
+                  <div className="space-y-3 mt-2 text-[11px] text-slate-400">
+                    <h4 className="font-bold text-slate-300 flex items-center gap-1">
+                      <span>📖</span> Como usar em 3 passos simples:
+                    </h4>
+                    <ol className="list-decimal list-inside space-y-2 pl-1 leading-relaxed">
+                      <li>
+                        <strong>Instale:</strong> Arraste o botão <strong>"Capturar Álbum ⚡"</strong> para sua Barra de Favoritos (pressione <kbd className="bg-slate-950 px-1 py-0.5 text-[9px] rounded text-slate-300 border border-slate-800">Ctrl+Shift+B</kbd> se a barra não estiver visível).
+                      </li>
+                      <li>
+                        <strong>Navegue:</strong> Abra qualquer álbum no site original (<strong>BAlbums</strong> ou <strong>Bunkr</strong>).
+                      </li>
+                      <li>
+                        <strong>Clique:</strong> Clique no favorito <strong>"Capturar Álbum ⚡"</strong>. Um balão aparecerá confirmando o envio e a página se atualizará aqui instantaneamente!
+                      </li>
+                    </ol>
+                  </div>
+
+                  <div className="border-t border-slate-850 pt-3 flex flex-col gap-2 mt-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] uppercase font-bold text-slate-500">Alternativa Mobile / Manual</span>
+                    </div>
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(getBookmarkletCode());
+                        alert('Código copiado! Para salvar no celular: \n1. Adicione qualquer página aos favoritos.\n2. Edite o favorito.\n3. Altere o nome para "Capturar Álbum ⚡" e cole este código no campo de URL.');
+                      }}
+                      className="w-full bg-slate-950 hover:bg-slate-900 text-indigo-400 text-[10px] font-bold py-2.5 px-3 border border-indigo-950 hover:border-indigo-900 rounded-xl transition duration-150 flex items-center justify-center gap-1.5"
+                    >
+                      <Clipboard className="h-3 w-3" />
+                      Copiar Código do Favorito
+                    </button>
+                  </div>
                 </div>
               )}
 
