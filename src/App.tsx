@@ -13,6 +13,7 @@ import {
   X,
   Play,
   Pause,
+  FileText,
   FolderOpen,
   FileArchive,
   CheckSquare,
@@ -28,7 +29,8 @@ import {
   Clipboard,
   Check,
   Globe,
-  ArrowLeft
+  ArrowLeft,
+  History
 } from 'lucide-react';
 import JSZip from 'jszip';
 import confetti from 'canvas-confetti';
@@ -99,8 +101,11 @@ export default function App() {
   const [searchIsLoading, setSearchIsLoading] = useState(false);
   const [trendingAlbums, setTrendingAlbums] = useState<any[]>([]);
 
-  // Tabs within the Import panel: 'url' | 'html' | 'saved' | 'help' | 'bookmarklet' | 'webview'
-  const [activeTab, setActiveTab] = useState<'url' | 'html' | 'saved' | 'help' | 'bookmarklet' | 'webview'>('url');
+  // Tabs within the Import panel: 'url' | 'html' | 'saved' | 'help' | 'bookmarklet' | 'webview' | 'history'
+  const [activeTab, setActiveTab] = useState<'url' | 'html' | 'saved' | 'help' | 'bookmarklet' | 'webview' | 'history'>('url');
+
+  // Download History
+  const [downloadHistory, setDownloadHistory] = useState<(MediaItem & { downloadedAt: Date })[]>([]);
 
   // Input states
   const [inputUrl, setInputUrl] = useState('');
@@ -127,6 +132,8 @@ export default function App() {
   // Filters and Selection
   const [searchQuery, setSearchQuery] = useState('');
   const [typeFilter, setTypeFilter] = useState<'all' | 'image' | 'video'>('all');
+  const [minSizeMB, setMinSizeMB] = useState('');
+  const [maxSizeMB, setMaxSizeMB] = useState('');
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
   // Local Storage Albums
@@ -1013,6 +1020,7 @@ export default function App() {
           
           count++;
           setDownloadedCount(count);
+          setDownloadHistory(prev => [{...item, downloadedAt: new Date()}, ...prev]);
           setDownloadProgress(Math.round((count / itemsToDownload.length) * 80)); // Max 80% for download phase
         } catch (error) {
           console.error(`Falha no download de ${item.name}:`, error);
@@ -1170,6 +1178,7 @@ export default function App() {
         
         count++;
         setDownloadedCount(count);
+        setDownloadHistory(prev => [{...item, downloadedAt: new Date()}, ...prev]);
         setDownloadProgress(Math.round((count / itemsToDownload.length) * 100));
         
         // Wait 400ms between streams to prevent browsers blocking popups or multiple downloads
@@ -1188,6 +1197,76 @@ export default function App() {
       spread: 70,
       origin: { y: 0.6 }
     });
+  };
+
+  // Export selected URLs to a .txt file
+  const handleExportUrls = async () => {
+    const itemsToExport = mediaItems.filter(item => selectedIds.has(item.id));
+    if (itemsToExport.length === 0) {
+      alert('Nenhum arquivo selecionado para exportar.');
+      return;
+    }
+
+    setIsDownloading(true);
+    setDownloadStatusText('Resolvendo links para exportação...');
+    
+    const resolveDirectUrl = async (item: MediaItem): Promise<string> => {
+      if (item.isResolved) return item.url;
+      try {
+        const response = await fetch(`/api/scrape?url=${encodeURIComponent(item.url)}`);
+        if (!response.ok) return item.url;
+        
+        let data: any;
+        const contentType = response.headers.get('content-type');
+        if (contentType && contentType.includes('application/json')) {
+          data = await response.json();
+        } else {
+          return item.url;
+        }
+        
+        const directMedia = data.items.find((i: any) => i.isResolved);
+        if (directMedia) {
+          item.url = directMedia.url;
+          item.isResolved = true;
+          return directMedia.url;
+        }
+      } catch (e) {
+        console.error('Erro ao resolver link:', e);
+      }
+      return item.url;
+    };
+
+    try {
+      const resolvedUrls: string[] = [];
+      for (let i = 0; i < itemsToExport.length; i++) {
+        const item = itemsToExport[i];
+        setDownloadStatusText(`Resolvendo (${i + 1}/${itemsToExport.length}): ${item.name}`);
+        const url = await resolveDirectUrl(item);
+        resolvedUrls.push(url);
+      }
+
+      const textContent = resolvedUrls.join('\n');
+      const blob = new Blob([textContent], { type: 'text/plain' });
+      const blobUrl = URL.createObjectURL(blob);
+      
+      const link = document.createElement('a');
+      link.href = blobUrl;
+      const safeTitle = albumTitle ? albumTitle.replace(/[^a-z0-9]/gi, '_').toLowerCase() : 'export';
+      link.download = `urls_${safeTitle}.txt`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 100);
+
+      setDownloadStatusText(`Sucesso! ${resolvedUrls.length} URLs exportadas.`);
+      confetti({ particleCount: 50, spread: 60, origin: { y: 0.8 } });
+    } catch (e) {
+      console.error('Erro ao exportar URLs:', e);
+      alert('Houve um erro ao exportar as URLs.');
+    } finally {
+      setIsDownloading(false);
+      setTimeout(() => setDownloadStatusText(''), 3000);
+    }
   };
 
   // Add current album to Saved Albums Library
@@ -1289,6 +1368,19 @@ export default function App() {
     setSelectedIds(next);
   };
 
+  const parseSizeToMB = (sizeStr: string): number | null => {
+    if (!sizeStr || sizeStr === 'Desconhecido') return null;
+    const match = sizeStr.match(/([\d\.]+)\s*(MB|KB|GB|B)/i);
+    if (!match) return null;
+    const val = parseFloat(match[1]);
+    const unit = match[2].toUpperCase();
+    if (unit === 'GB') return val * 1024;
+    if (unit === 'MB') return val;
+    if (unit === 'KB') return val / 1024;
+    if (unit === 'B') return val / (1024 * 1024);
+    return null;
+  };
+
   // Filter logic with multi-term support (AND matching)
   const getFilteredItems = () => {
     const terms = searchQuery
@@ -1296,12 +1388,29 @@ export default function App() {
       .split(/[\s,]+/)
       .filter(t => t.trim().length > 0);
 
+    const minSize = minSizeMB ? parseFloat(minSizeMB) : null;
+    const maxSize = maxSizeMB ? parseFloat(maxSizeMB) : null;
+
     return mediaItems.filter(item => {
       const nameLower = item.name.toLowerCase();
       // If terms are present, check if all of them are contained in the filename
       const matchesSearch = terms.length === 0 || terms.every(term => nameLower.includes(term));
       const matchesType = typeFilter === 'all' || item.type === typeFilter;
-      return matchesSearch && matchesType;
+      
+      let matchesSize = true;
+      if (minSize !== null || maxSize !== null) {
+        const itemSizeMB = parseSizeToMB(item.size);
+        if (itemSizeMB !== null) {
+          if (minSize !== null && itemSizeMB < minSize) matchesSize = false;
+          if (maxSize !== null && itemSizeMB > maxSize) matchesSize = false;
+        } else {
+          // If size is unknown, and we have a size filter, do we exclude it?
+          // Let's exclude unknown sizes if a size filter is applied.
+          matchesSize = false;
+        }
+      }
+
+      return matchesSearch && matchesType && matchesSize;
     });
   };
 
@@ -1473,6 +1582,21 @@ export default function App() {
             >
               <FolderOpen className="h-3.5 w-3.5" />
               Biblioteca ({savedAlbums.length})
+            </button>
+            <button
+              onClick={() => {
+                setViewMode('viewer');
+                setActiveTab('history');
+              }}
+              id="nav-tab-history"
+              className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all duration-200 ${
+                viewMode === 'viewer' && activeTab === 'history'
+                  ? 'bg-indigo-600 text-white shadow'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/40'
+              }`}
+            >
+              <History className="h-3.5 w-3.5" />
+              Histórico
             </button>
             <button
               onClick={() => {
@@ -2417,6 +2541,72 @@ export default function App() {
                   </div>
                 </div>
               )}
+
+              {/* Tab 6: History */}
+              {activeTab === 'history' && (
+                <div className="flex flex-col gap-4">
+                  <div className="flex items-center gap-2">
+                    <History className="h-5 w-5 text-indigo-400" />
+                    <h3 className="text-sm font-bold tracking-wide uppercase text-slate-300">Histórico de Sessão</h3>
+                  </div>
+                  {downloadHistory.length === 0 ? (
+                    <div className="text-center py-6">
+                      <p className="text-xs text-slate-500">Nenhum download registrado nesta sessão.</p>
+                    </div>
+                  ) : (
+                    <div className="space-y-2 mt-1 max-h-[300px] overflow-y-auto pr-1 custom-scrollbar">
+                      {downloadHistory.map((item, index) => (
+                        <div key={`${item.id}-${index}`} className="flex items-center justify-between p-2.5 bg-slate-950/50 rounded-xl border border-slate-850">
+                          <div className="flex items-center gap-3 overflow-hidden">
+                            <div className="w-8 h-8 rounded bg-slate-900 flex items-center justify-center shrink-0">
+                              {item.type === 'video' ? <VideoIcon className="h-4 w-4 text-rose-400" /> : <ImageIcon className="h-4 w-4 text-emerald-400" />}
+                            </div>
+                            <div className="flex flex-col min-w-0">
+                              <span className="text-xs font-semibold text-slate-300 truncate">{item.name}</span>
+                              <span className="text-[10px] text-slate-500">{item.downloadedAt.toLocaleTimeString()} - {item.size}</span>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-1">
+                            <button
+                              onClick={async () => {
+                                const directUrl = item.url;
+                                const finalDownloadUrl = `/api/proxy-media?url=${encodeURIComponent(directUrl)}&download=true&filename=${encodeURIComponent(item.name)}`;
+                                const link = document.createElement('a');
+                                link.href = finalDownloadUrl;
+                                link.download = item.name;
+                                document.body.appendChild(link);
+                                link.click();
+                                document.body.removeChild(link);
+                              }}
+                              className="p-1.5 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-indigo-400 transition"
+                              title="Repetir Download"
+                            >
+                              <Download className="h-4 w-4" />
+                            </button>
+                            <a
+                              href={item.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="p-1.5 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-indigo-400 transition"
+                              title="Abrir URL original"
+                            >
+                              <ExternalLink className="h-4 w-4" />
+                            </a>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {downloadHistory.length > 0 && (
+                     <button
+                       onClick={() => setDownloadHistory([])}
+                       className="mt-2 text-xs text-slate-500 hover:text-rose-400 font-semibold transition self-start"
+                     >
+                       Limpar Histórico
+                     </button>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* Active Download Status Panel (shows when active downloading) */}
@@ -2581,7 +2771,7 @@ export default function App() {
 
                   {/* Core Download Hub Trigger */}
                   <div className="flex flex-col gap-3 mt-1 w-full">
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 w-full">
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3 w-full">
                       <button
                         onClick={handleDownloadAllIndividual}
                         disabled={isDownloading || selectedIds.size === 0}
@@ -2590,7 +2780,7 @@ export default function App() {
                         title="Baixa os arquivos um de cada vez pelo gerenciador de downloads do navegador. Não trava o navegador e suporta vídeos pesados!"
                       >
                         <Download className="h-4 w-4 animate-bounce" />
-                        Baixar em Lote (Nativo / Super Rápido ⚡)
+                        Baixar em Lote
                       </button>
 
                       <button
@@ -2601,7 +2791,18 @@ export default function App() {
                         title="Compacta todos os selecionados em um único arquivo .zip (Recomendado apenas para imagens ou poucos arquivos pequenos)."
                       >
                         <FileArchive className="h-4 w-4" />
-                        Baixar Selecionadas (.zip)
+                        Baixar (.zip)
+                      </button>
+
+                      <button
+                        onClick={handleExportUrls}
+                        disabled={isDownloading || selectedIds.size === 0}
+                        id="btn-export-urls"
+                        className="w-full bg-slate-800 hover:bg-slate-700 active:scale-[0.99] text-slate-200 hover:text-white font-bold text-xs md:text-sm py-3.5 px-5 rounded-2xl border border-slate-700 flex items-center justify-center gap-2 transition duration-150 disabled:opacity-50 disabled:pointer-events-none"
+                        title="Exporta os links diretos para um arquivo .txt (ideal para JDownloader)."
+                      >
+                        <FileText className="h-4 w-4" />
+                        Exportar URLs (.txt)
                       </button>
                     </div>
 
@@ -2702,6 +2903,37 @@ export default function App() {
 
                   {/* Row 2: Active suggestions or search stats */}
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-3 border-t border-slate-850/60">
+                    {/* Size Filter */}
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span className="text-[10px] font-extrabold text-slate-500 uppercase tracking-wider hidden sm:inline-block mr-1">Tamanho (MB):</span>
+                      <input
+                        type="number"
+                        placeholder="Mín"
+                        value={minSizeMB}
+                        onChange={(e) => setMinSizeMB(e.target.value)}
+                        min="0"
+                        className="w-16 bg-slate-950 border border-slate-850 rounded-lg py-1 px-2 text-xs text-slate-200 placeholder:text-slate-650 focus:outline-none focus:ring-1 focus:ring-indigo-500 transition duration-150"
+                      />
+                      <span className="text-slate-600 text-xs">-</span>
+                      <input
+                        type="number"
+                        placeholder="Máx"
+                        value={maxSizeMB}
+                        onChange={(e) => setMaxSizeMB(e.target.value)}
+                        min="0"
+                        className="w-16 bg-slate-950 border border-slate-850 rounded-lg py-1 px-2 text-xs text-slate-200 placeholder:text-slate-650 focus:outline-none focus:ring-1 focus:ring-indigo-500 transition duration-150"
+                      />
+                      {(minSizeMB || maxSizeMB) && (
+                        <button
+                          onClick={() => { setMinSizeMB(''); setMaxSizeMB(''); }}
+                          className="p-1 rounded-md hover:bg-slate-900 text-slate-400 hover:text-slate-200 transition"
+                          title="Limpar filtro de tamanho"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      )}
+                    </div>
+
                     {/* Dynamic Suggestions */}
                     <div className="flex flex-wrap items-center gap-1.5 text-xs">
                       <span className="text-[10px] font-extrabold text-slate-500 uppercase tracking-wider mr-1">Filtrar por Termos Rápidos:</span>

@@ -575,71 +575,90 @@ Para cada álbum, você deve gerar:
     });
   };
 
-  // Helper function to perform HTTP/HTTPS requests with user agent, routing through corsproxy.io
-  const fetchPage = (targetUrl: string): Promise<{ html: string; statusCode: number; headers: any }> => {
-    return new Promise((resolve, reject) => {
-      try {
-        const rewrittenUrl = rewriteBunkrUrl(targetUrl);
-        const proxyUrl = `https://corsproxy.io/?key=fe647f89&url=${encodeURIComponent(rewrittenUrl)}`;
-        const parsedUrl = new URL(proxyUrl);
-        
-        console.log(`[CORS Proxy] Encaminhando requisição de ${rewrittenUrl} via corsproxy.io`);
-        
-        const options: https.RequestOptions = {
-          hostname: parsedUrl.hostname,
-          path: parsedUrl.pathname + parsedUrl.search,
-          method: 'GET',
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9,pt-BR;q=0.8,pt;q=0.7',
-          },
-          timeout: 15000,
-          rejectUnauthorized: false,
-        };
-
-        const req = https.request(options, (res) => {
-          let chunks: any[] = [];
-          res.on('data', (chunk) => chunks.push(chunk));
-          res.on('end', () => {
-            const buffer = Buffer.concat(chunks);
-            const html = buffer.toString('utf-8');
-            
-            const trimmedHtml = html.trim();
-            const isHtml = trimmedHtml.startsWith('<') || html.includes('<html') || html.includes('<div') || html.includes('<!DOCTYPE') || html.includes('<body');
-            const isProxyError = html.startsWith('The page') || html.includes('could not be loaded') || html.includes('Proxy Error') || html.includes('corsproxy.io') || html.length < 200 || trimmedHtml === '';
-
-            // If proxy returns an error code, non-HTML content, or a known proxy error text, fallback to direct fetch
-            if ((res.statusCode && res.statusCode >= 400) || !isHtml || isProxyError) {
-              console.warn(`[CORS Proxy] Resposta inválida ou erro do proxy (Status: ${res.statusCode}, IsHTML: ${isHtml}, IsProxyError: ${isProxyError}). Tentando requisição direta.`);
-              fetchPageDirect(targetUrl).then(resolve).catch(reject);
-            } else {
-              resolve({
-                html,
-                statusCode: res.statusCode || 200,
-                headers: res.headers,
-              });
-            }
-          });
-        });
-
-        req.on('error', (err) => {
-          console.warn('[CORS Proxy] Falha na conexão com o proxy, usando requisição direta:', err.message);
-          fetchPageDirect(targetUrl).then(resolve).catch(reject);
-        });
-
-        req.on('timeout', () => {
-          req.destroy();
-          console.warn('[CORS Proxy] Tempo limite excedido no proxy, usando requisição direta.');
-          fetchPageDirect(targetUrl).then(resolve).catch(reject);
-        });
-
-        req.end();
-      } catch (error) {
-        console.warn('[CORS Proxy Error] Falha de inicialização, usando requisição direta:', error);
-        fetchPageDirect(targetUrl).then(resolve).catch(reject);
+  // Helper function to perform HTTP/HTTPS requests with user agent, trying direct first, then proxies
+  const fetchPage = async (targetUrl: string): Promise<{ html: string; statusCode: number; headers: any }> => {
+    const rewrittenUrl = rewriteBunkrUrl(targetUrl);
+    
+    // Attempt direct fetch first
+    try {
+      const directResult = await fetchPageDirect(targetUrl);
+      // If it's a valid HTML response and not a Cloudflare block, return it
+      const trimmedHtml = directResult.html.trim();
+      const isCloudflareBlock = trimmedHtml.includes('<title>Just a moment...</title>') || trimmedHtml.includes('cloudflare');
+      if (directResult.statusCode < 400 && !isCloudflareBlock) {
+        return directResult;
       }
-    });
+      console.log(`[Fetch] Requisição direta retornou status ${directResult.statusCode} ou bloqueio Cloudflare. Tentando proxies...`);
+    } catch (err: any) {
+      console.log(`[Fetch] Requisição direta falhou (${err.message}). Tentando proxies...`);
+    }
+
+    const proxyUrls = [
+      `https://api.allorigins.win/raw?url=${encodeURIComponent(rewrittenUrl)}`,
+      `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(rewrittenUrl)}`,
+      `https://corsproxy.io/?key=fe647f89&url=${encodeURIComponent(rewrittenUrl)}`,
+      `https://thingproxy.freeboard.io/fetch/${rewrittenUrl}`,
+      `https://api.cors.lol/?url=${encodeURIComponent(rewrittenUrl)}`
+    ];
+
+    for (const proxyUrl of proxyUrls) {
+      try {
+        const result = await new Promise<{ html: string; statusCode: number; headers: any }>((resolve, reject) => {
+          const parsedUrl = new URL(proxyUrl);
+          
+          const options: https.RequestOptions = {
+            hostname: parsedUrl.hostname,
+            path: parsedUrl.pathname + parsedUrl.search,
+            method: 'GET',
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+              'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+              'Accept-Language': 'en-US,en;q=0.9,pt-BR;q=0.8,pt;q=0.7',
+            },
+            timeout: 10000,
+            rejectUnauthorized: false,
+          };
+
+          const req = https.request(options, (res) => {
+            let chunks: any[] = [];
+            res.on('data', (chunk) => chunks.push(chunk));
+            res.on('end', () => {
+              const buffer = Buffer.concat(chunks);
+              const html = buffer.toString('utf-8');
+              
+              const trimmedHtml = html.trim();
+              const isHtml = trimmedHtml.startsWith('<') || html.includes('<html') || html.includes('<div') || html.includes('<!DOCTYPE') || html.includes('<body');
+              const isProxyError = html.startsWith('The page') || html.includes('could not be loaded') || html.includes('Proxy Error') || html.includes('corsproxy.io') || html.includes('api.cors.lol') || html.includes('allorigins') || html.includes('codetabs') || html.length < 200 || trimmedHtml === '';
+
+              if ((res.statusCode && res.statusCode >= 400) || !isHtml || isProxyError) {
+                reject(new Error(`Proxy error or invalid content (Status: ${res.statusCode})`));
+              } else {
+                resolve({
+                  html,
+                  statusCode: res.statusCode || 200,
+                  headers: res.headers,
+                });
+              }
+            });
+          });
+
+          req.on('error', (err) => reject(err));
+          req.on('timeout', () => {
+            req.destroy();
+            reject(new Error('Timeout'));
+          });
+
+          req.end();
+        });
+        
+        // Return if successful
+        return result;
+      } catch (err: any) {
+        // Silently continue to the next proxy to avoid spamming the console with errors the user sees
+      }
+    }
+
+    throw new Error('Todos os métodos de requisição falharam.');
   };
 
   // Endpoint 1: Scrapes an album URL or individual media URL
