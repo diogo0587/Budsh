@@ -1300,6 +1300,87 @@ Para cada álbum, você deve gerar:
     }
   });
 
+  // General API proxy route for Bunkr and BAlbums
+  app.all('/api/proxy', async (req, res) => {
+    const targetUrlStr = (req.query.url || req.body?.url) as string;
+    if (!targetUrlStr) {
+      res.status(400).json({ error: 'Parâmetro "url" é obrigatório' });
+      return;
+    }
+
+    try {
+      let targetUrl: URL;
+      try {
+        targetUrl = new URL(targetUrlStr);
+      } catch (e) {
+        res.status(400).json({ error: 'URL inválida' });
+        return;
+      }
+
+      const hostname = targetUrl.hostname.toLowerCase();
+      const allowedHosts = [
+        'bunkr.cr', 'balbums.st', 'media-files.bunkr.cr', 'cdn.bunkr.cr', 'storage.bunkr.cr', 'get.bunkr.cr',
+        'bunkrr.su', 'bunkr.is', 'bunkr.ru', 'bunkr.si', 'bunkr.la', 'bunkr.ph', 'bunkr.site', 'bunkr.ws',
+        'bunkr.red', 'bunkr.black', 'bunkr.art', 'bunkr.sk', 'bunkr.pk', 'bunkr.ca', 'bunkr.ax', 'bunkr.fi',
+        'bunkr.to', 'bunkr.ac', 'bunkr.se', 'bunkr.ci', 'bunkr.cat', 'bunkr.d', 'bunkr.pm', 'bunkr.app',
+        'bunkr.click', 'bunkr.one', 'bunkr.media', 'bunkr.st', 'bunkr.club', 'bunkr.asia'
+      ];
+
+      const isAllowed = allowedHosts.some(host => hostname === host || hostname.endsWith(`.${host}`)) ||
+                        hostname.includes('bunkr') || hostname.includes('balbum') || hostname.includes('media-files') || hostname.includes('bunkrr');
+
+      if (!isAllowed) {
+        res.status(403).json({ error: 'Domínio não permitido pelo proxy' });
+        return;
+      }
+
+      let htmlContent: string | null = null;
+      let contentType = 'text/html; charset=utf-8';
+
+      try {
+        const pageRes = await fetchPage(targetUrlStr);
+        htmlContent = pageRes.html;
+      } catch (err) {
+        try {
+          const directRes = await fetchPageDirect(targetUrlStr);
+          htmlContent = directRes.html;
+        } catch (e2) {
+          const fetchRes = await fetch(targetUrlStr, {
+            method: req.method || 'GET',
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+              'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+              'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
+              'Cache-Control': 'max-age=0',
+            }
+          });
+          contentType = fetchRes.headers.get('content-type') || contentType;
+          htmlContent = await fetchRes.text();
+        }
+      }
+
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Content-Type', contentType);
+      res.setHeader('Cache-Control', 'public, max-age=60');
+
+      if (contentType.includes('application/json')) {
+        try {
+          res.json(JSON.parse(htmlContent));
+          return;
+        } catch (e) {}
+      }
+
+      res.send(htmlContent);
+
+    } catch (error: any) {
+      console.error('[Proxy Error]', error.message);
+      res.status(500).json({ 
+        error: 'Erro ao acessar o destino',
+        details: error.message 
+      });
+    }
+  });
+
   // Bookmarklet automated HTML capture states and endpoints
   let lastCapturedAlbum: { html: string; url: string; title: string; timestamp: number } | null = null;
 
