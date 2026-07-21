@@ -6,9 +6,13 @@ import http from 'http';
 import https from 'https';
 import { gotScraping } from 'got-scraping';
 import { GoogleGenAI, Type } from '@google/genai';
+import serverless from 'serverless-http';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+const app = express();
+export const handler = serverless(app);
 
 // Initialize Gemini client if API key is present
 const ai = process.env.GEMINI_API_KEY
@@ -23,7 +27,6 @@ const ai = process.env.GEMINI_API_KEY
   : null;
 
 async function startServer() {
-  const app = express();
   const PORT = 3000;
 
   app.use(cors());
@@ -695,6 +698,100 @@ Para cada álbum, você deve gerar:
     throw new Error('Todos os métodos de requisição falharam.');
   };
 
+  // Helper to identify video URLs
+  function isVideoUrl(url: string): boolean {
+    const videoExtensions = /\.(mp4|mkv|mov|webm|avi|m4v|flv|wmv|ts|m3u8|m3u|mpg|mpeg|3gp)($|\?)/i;
+    return videoExtensions.test(url) || url.includes('/v/') || url.includes('video') || url.includes('stream') || url.includes('get.bunkr');
+  }
+
+  // Helper to extract file name from URL or fallback
+  function extractFileNameFromUrl(url: string): string {
+    try {
+      const parsed = new URL(url);
+      const pathname = parsed.pathname;
+      const parts = pathname.split('/');
+      const last = parts[parts.length - 1];
+      if (last && last.includes('.')) {
+        return decodeURIComponent(last);
+      }
+      if (isVideoUrl(url)) {
+        return last ? `${decodeURIComponent(last)}.mp4` : 'video.mp4';
+      }
+      return last || 'file';
+    } catch {
+      return 'file';
+    }
+  }
+
+  // Helper to extract video items from HTML tags (<video>, <source>, data-* attributes, view pages)
+  function extractAllVideosFromHtml(html: string, baseUrl: string): any[] {
+    const videos: any[] = [];
+    const seen = new Set<string>();
+
+    // 1. Tags <video> and <source>
+    const videoRegex = /<(?:video|source)[^>]+(?:src|data-src|data-video|data-mp4)=["']([^"']+)["']/gi;
+    let match;
+    while ((match = videoRegex.exec(html)) !== null) {
+      let url = match[1];
+      if (url.startsWith('//')) url = 'https:' + url;
+      else if (url.startsWith('/')) url = baseUrl + url;
+      url = rewriteBunkrUrl(url);
+      if (!seen.has(url) && isVideoUrl(url)) {
+        seen.add(url);
+        const name = extractFileNameFromUrl(url) || `video_${videos.length + 1}.mp4`;
+        videos.push({
+          url,
+          name,
+          type: 'video',
+          size: 'Desconhecido',
+          isResolved: true,
+        });
+      }
+    }
+
+    // 2. Data attributes with video extensions
+    const dataAttrRegex = /(?:data-file|data-href|data-url|data-video|data-mp4)=["']([^"']+\.(?:mp4|mkv|mov|webm|avi|m4v|flv|wmv|ts|m3u8)[^"']*)["']/gi;
+    while ((match = dataAttrRegex.exec(html)) !== null) {
+      let url = match[1];
+      if (url.startsWith('//')) url = 'https:' + url;
+      else if (url.startsWith('/')) url = baseUrl + url;
+      url = rewriteBunkrUrl(url);
+      if (!seen.has(url) && isVideoUrl(url)) {
+        seen.add(url);
+        const name = extractFileNameFromUrl(url) || `video_${videos.length + 1}.mp4`;
+        videos.push({
+          url,
+          name,
+          type: 'video',
+          size: 'Desconhecido',
+          isResolved: true,
+        });
+      }
+    }
+
+    // 3. Links to /v/ or /d/ view pages
+    const viewRegex = /<a[^>]+href=["']([^"']*\/[vd]\/([a-zA-Z0-9_\-\.]+)[^"']*)["']/gi;
+    while ((match = viewRegex.exec(html)) !== null) {
+      let url = match[1];
+      if (url.startsWith('//')) url = 'https:' + url;
+      else if (url.startsWith('/')) url = baseUrl + url;
+      url = rewriteBunkrUrl(url);
+      const slug = match[2];
+      if (!seen.has(url)) {
+        seen.add(url);
+        videos.push({
+          url,
+          name: `${slug}.mp4`,
+          type: 'video',
+          size: 'Desconhecido',
+          isResolved: false,
+        });
+      }
+    }
+
+    return videos;
+  }
+
   // Helper to parse Next.js __NEXT_DATA__ or embedded JSON in Bunkr/BAlbums pages
   function extractFilesFromNextDataOrJson(html: string, pageUrl: string): any[] {
     const items: any[] = [];
@@ -832,8 +929,14 @@ Para cada álbum, você deve gerar:
       // Check if target URL itself is a single Bunkr view page (/v/, /d/, /f/) or direct media
       const isSingleViewPage = /\/(v|i|d|f|file|view|watch|download)\/[^\s"'<>#]+/i.test(targetUrl);
       if (isSingleViewPage) {
-        // Try to find direct media URL inside HTML
-        const directMediaUrl = extractDirectMediaUrlFromHtml(html, targetUrl);
+        // Tentar extrair file_id e obter URL assinada primeiro
+        const fileId = extractFileIdFromItemPage(html);
+        let signedUrl: string | null = null;
+        if (fileId) {
+          signedUrl = await getSignedUrl(fileId);
+        }
+
+        const directMediaUrl = signedUrl || extractDirectMediaUrlFromHtml(html, targetUrl);
         if (directMediaUrl) {
           const lower = directMediaUrl.toLowerCase();
           const isVideo = /\.(mp4|mkv|mov|webm|avi|m4v|flv|wmv|ts|3gp)($|\?)/i.test(lower) || targetUrl.toLowerCase().includes('/v/');
@@ -876,6 +979,15 @@ Para cada álbum, você deve gerar:
         if (!seen.has(item.url)) {
           seen.add(item.url);
           items.push(item);
+        }
+      }
+
+      // 1.5 Extract videos directly from HTML tags and video data attributes
+      const videoItems = extractAllVideosFromHtml(html, baseUrl);
+      for (const video of videoItems) {
+        if (!seen.has(video.url)) {
+          seen.add(video.url);
+          items.push(video);
         }
       }
 
@@ -961,6 +1073,33 @@ Para cada álbum, você deve gerar:
         }
       }
 
+      // Tentar resolver links não resolvidos usando a API de assinatura do Bunkr em lote (batch de 5)
+      const unresolvedItems = items.filter(i => !i.isResolved && /\/(v|i|d|f|file|view|watch|download)\//i.test(i.url));
+      if (unresolvedItems.length > 0) {
+        console.log(`[Scrape] Tentando resolver ${unresolvedItems.length} itens não resolvidos via API /api/download...`);
+        const batchSize = 5;
+        for (let i = 0; i < unresolvedItems.length; i += batchSize) {
+          const batch = unresolvedItems.slice(i, i + batchSize);
+          await Promise.all(
+            batch.map(async (item) => {
+              try {
+                const { html: itemHtml } = await fetchPage(item.url);
+                const fileId = extractFileIdFromItemPage(itemHtml);
+                if (fileId) {
+                  const signedUrl = await getSignedUrl(fileId);
+                  if (signedUrl) {
+                    item.url = signedUrl;
+                    item.isResolved = true;
+                  }
+                }
+              } catch (err) {
+                // Manter URL original se falhar
+              }
+            })
+          );
+        }
+      }
+
       // Check if title can be extracted
       const titleMatch = html.match(/<title>([^<]+)<\/title>/i) || html.match(/<h1[^>]*>([^<]+)<\/h1>/i);
       const title = titleMatch ? titleMatch[1].replace(' - Bunkr', '').replace(' - BAlbums', '').trim() : 'Álbum Desconhecido';
@@ -1024,9 +1163,62 @@ Para cada álbum, você deve gerar:
     }
   });
 
+  // Extrai o file_id do script data-file-id ou de variáveis JS
+  function extractFileIdFromItemPage(html: string): string | null {
+    // Procura por <script data-file-id="..."> ou data-file-id="..."
+    const match = html.match(/(?:data-file-id|data-id)=["']([^"']+)["']/i);
+    if (match && match[1]) return match[1];
+
+    // Fallback: procura "fileId": "..." ou "id": "..." no JSON interno do Next.js / React
+    const jsonMatch = html.match(/"fileId"\s*:\s*"([^"]+)"/i) || html.match(/"file_id"\s*:\s*"([^"]+)"/i);
+    if (jsonMatch && jsonMatch[1]) return jsonMatch[1];
+
+    return null;
+  }
+
+  // Obtém a URL assinada do Bunkr via API /api/download
+  async function getSignedUrl(fileId: string): Promise<string | null> {
+    if (!fileId) return null;
+    try {
+      console.log(`[Signed URL] Solicitando token assinado para file_id: ${fileId}`);
+      const response = await fetch('https://bunkr.cr/api/download', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Referer': 'https://bunkr.cr/',
+          'Accept': 'application/json, text/plain, */*',
+        },
+        body: JSON.stringify({ id: fileId }),
+      });
+
+      if (!response.ok) {
+        console.warn(`[Signed URL] Resposta da API não-ok (${response.status}) para id ${fileId}`);
+        return null;
+      }
+
+      const data = await response.json();
+      const baseUrl = data.mediafiles || data.url || data.downloadUrl || data.link;
+      const path = data.path || '';
+
+      if (baseUrl && path) {
+        const full = baseUrl.endsWith('/') || path.startsWith('/') ? `${baseUrl}${path}` : `${baseUrl}/${path}`;
+        return rewriteBunkrUrl(full);
+      }
+      if (baseUrl) {
+        return rewriteBunkrUrl(baseUrl);
+      }
+      return null;
+    } catch (error) {
+      console.error('[Signed URL] Erro ao chamar /api/download:', error);
+      return null;
+    }
+  }
+
   // Helper to extract direct media link from view page HTML
   function extractDirectMediaUrlFromHtml(html: string, pageUrl: string): string | null {
     try {
+      // Tentar extrair via data-file-id e chamar API (de forma síncrona / estática primeiro)
       const unescapedHtml = html.replace(/\\\/|\\u002F/gi, '/');
       const urlObj = new URL(pageUrl);
       const baseUrl = `${urlObj.protocol}//${urlObj.hostname}`;
@@ -1438,9 +1630,11 @@ Para cada álbum, você deve gerar:
     app.use(vite.middlewares);
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server is running at http://0.0.0.0:${PORT}`);
-  });
+  if (!process.env.VERCEL) {
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log(`Server is running at http://0.0.0.0:${PORT}`);
+    });
+  }
 }
 
 startServer().catch((err) => {

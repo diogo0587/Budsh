@@ -56,6 +56,25 @@ interface SavedAlbum {
   savedAt: string;
 }
 
+// Interface for Extraction and Format Preference Settings
+interface ExtractionSettings {
+  preferredVideoFormat: 'mp4' | 'mkv' | 'webm' | 'mov' | 'any';
+  preferredImageFormat: 'jpg' | 'png' | 'webp' | 'any';
+  autoSelectImported: boolean;
+  resolveDirectLinks: boolean;
+  sortByFormatPriority: boolean;
+  filterUnwantedExtensions: boolean;
+}
+
+const DEFAULT_EXTRACTION_SETTINGS: ExtractionSettings = {
+  preferredVideoFormat: 'mp4',
+  preferredImageFormat: 'jpg',
+  autoSelectImported: true,
+  resolveDirectLinks: true,
+  sortByFormatPriority: true,
+  filterUnwantedExtensions: true,
+};
+
 // Helper to rewrite old or dead Bunkr domains to active working domains (bunkr.cr / media-files.bunkr.cr)
 const rewriteBunkrUrl = (urlStr: string): string => {
   if (!urlStr) return '';
@@ -114,8 +133,106 @@ export default function App() {
   const [searchIsLoading, setSearchIsLoading] = useState(false);
   const [trendingAlbums, setTrendingAlbums] = useState<any[]>([]);
 
-  // Tabs within the Import panel: 'url' | 'html' | 'saved' | 'help' | 'bookmarklet' | 'webview' | 'history'
-  const [activeTab, setActiveTab] = useState<'url' | 'html' | 'saved' | 'help' | 'bookmarklet' | 'webview' | 'history'>('url');
+  // Tabs within the Import panel: 'url' | 'html' | 'saved' | 'help' | 'bookmarklet' | 'webview' | 'history' | 'settings'
+  const [activeTab, setActiveTab] = useState<'url' | 'html' | 'saved' | 'help' | 'bookmarklet' | 'webview' | 'history' | 'settings'>('url');
+
+  // Extraction Settings state with LocalStorage persistence
+  const [extractionSettings, setExtractionSettings] = useState<ExtractionSettings>(() => {
+    try {
+      const stored = localStorage.getItem('balbums_extraction_settings');
+      if (stored) {
+        return { ...DEFAULT_EXTRACTION_SETTINGS, ...JSON.parse(stored) };
+      }
+    } catch (e) {
+      console.error('Erro ao ler configurações de extração:', e);
+    }
+    return DEFAULT_EXTRACTION_SETTINGS;
+  });
+
+  // Auto-save settings when changed
+  useEffect(() => {
+    try {
+      localStorage.setItem('balbums_extraction_settings', JSON.stringify(extractionSettings));
+    } catch (e) {
+      console.error('Erro ao salvar configurações de extração:', e);
+    }
+  }, [extractionSettings]);
+
+  // Helper to apply format priority, filtering, and sorting to media items
+  const applyExtractionRules = (items: MediaItem[], settings: ExtractionSettings = extractionSettings): MediaItem[] => {
+    if (!items || items.length === 0) return items;
+
+    let result = [...items];
+
+    // 1. Filter unwanted non-media extensions if enabled
+    if (settings.filterUnwantedExtensions) {
+      result = result.filter(item => {
+        const lowerUrl = item.url.toLowerCase();
+        const lowerName = item.name.toLowerCase();
+        const isUnwanted = /\.(exe|bat|cmd|sh|js|css|php|html|htm|txt|json|xml|zip|rar|7z|pdf)($|\?)/i.test(lowerUrl) ||
+                           /\.(exe|bat|cmd|sh|js|css|php|html|htm|txt|json|xml|zip|rar|7z|pdf)$/i.test(lowerName);
+        return !isUnwanted;
+      });
+    }
+
+    // 2. Sort & Prioritize items based on format preference
+    if (settings.sortByFormatPriority) {
+      result.sort((a, b) => {
+        const getScore = (item: MediaItem) => {
+          const lowerUrl = item.url.toLowerCase();
+          const lowerName = item.name.toLowerCase();
+
+          if (item.type === 'video') {
+            if (settings.preferredVideoFormat !== 'any') {
+              const pref = `.${settings.preferredVideoFormat}`;
+              if (lowerUrl.includes(pref) || lowerName.endsWith(pref)) {
+                return 1000;
+              }
+            }
+            if (lowerUrl.includes('.mp4') || lowerName.endsWith('.mp4')) return 800;
+            if (lowerUrl.includes('.mkv') || lowerName.endsWith('.mkv')) return 700;
+            if (lowerUrl.includes('.webm') || lowerName.endsWith('.webm')) return 600;
+            if (lowerUrl.includes('.mov') || lowerName.endsWith('.mov')) return 500;
+            return 400;
+          }
+
+          if (item.type === 'image') {
+            if (settings.preferredImageFormat !== 'any') {
+              const pref = `.${settings.preferredImageFormat}`;
+              if (lowerUrl.includes(pref) || lowerName.endsWith(pref) || (pref === '.jpg' && (lowerUrl.includes('.jpeg') || lowerName.endsWith('.jpeg')))) {
+                return 950;
+              }
+            }
+            if (lowerUrl.includes('.jpg') || lowerUrl.includes('.jpeg') || lowerName.endsWith('.jpg') || lowerName.endsWith('.jpeg')) return 750;
+            if (lowerUrl.includes('.png') || lowerName.endsWith('.png')) return 700;
+            if (lowerUrl.includes('.webp') || lowerName.endsWith('.webp')) return 650;
+            return 350;
+          }
+
+          return 100;
+        };
+
+        return getScore(b) - getScore(a);
+      });
+    }
+
+    return result;
+  };
+
+  // Reorganize current album according to active settings
+  const handleReorganizeCurrentAlbum = () => {
+    if (mediaItems.length === 0) return;
+    const processed = applyExtractionRules(mediaItems, extractionSettings);
+    setMediaItems(processed);
+    if (extractionSettings.autoSelectImported) {
+      setSelectedIds(new Set(processed.map(i => i.id)));
+    }
+    setSuccessMessage(`Álbum reordenado! ${processed.length} mídias organizadas com base no seu formato prioritário (.${extractionSettings.preferredVideoFormat.toUpperCase()}).`);
+    setTimeout(() => setSuccessMessage(''), 4500);
+    try {
+      confetti({ particleCount: 30, spread: 60, origin: { y: 0.7 } });
+    } catch (e) {}
+  };
 
   // Download History
   const [downloadHistory, setDownloadHistory] = useState<(MediaItem & { downloadedAt: Date, status: 'success' | 'failed' })[]>([]);
@@ -446,7 +563,8 @@ export default function App() {
         finalTitle = 'Álbum Importado via Webview';
       }
 
-      setWebviewMediaItems(items);
+      const processedItems = applyExtractionRules(items, extractionSettings);
+      setWebviewMediaItems(processedItems);
       setWebviewAlbumTitle(finalTitle);
     } catch (error) {
       console.error('Erro na extração do Webview:', error);
@@ -492,8 +610,11 @@ export default function App() {
         isResolved: true
       }));
 
-      setMediaItems(mappedItems);
-      setSelectedIds(new Set(mappedItems.map(i => i.id)));
+      const processedItems = applyExtractionRules(mappedItems, extractionSettings);
+      setMediaItems(processedItems);
+      if (extractionSettings.autoSelectImported) {
+        setSelectedIds(new Set(processedItems.map(i => i.id)));
+      }
     } else if (album.url) {
       setIsLoading(true);
       setMediaItems([]);
@@ -531,8 +652,11 @@ export default function App() {
         }));
 
         setAlbumTitle(data.title || album.title);
-        setMediaItems(mappedItems);
-        setSelectedIds(new Set(mappedItems.map((i: any) => i.id)));
+        const processedItems = applyExtractionRules(mappedItems, extractionSettings);
+        setMediaItems(processedItems);
+        if (extractionSettings.autoSelectImported) {
+          setSelectedIds(new Set(processedItems.map((i: any) => i.id)));
+        }
       } catch (err: any) {
         setErrorMessage(`Falha ao carregar conteúdo do álbum: ${err.message}`);
       } finally {
@@ -947,11 +1071,14 @@ export default function App() {
       if (originalUrl) {
         setInputUrl(originalUrl);
       }
-      setMediaItems(items);
+      const processedItems = applyExtractionRules(items, extractionSettings);
+      setMediaItems(processedItems);
       setViewMode('viewer');
       
-      // Auto-select all items
-      setSelectedIds(new Set(items.map(i => i.id)));
+      // Auto-select items if configured
+      if (extractionSettings.autoSelectImported) {
+        setSelectedIds(new Set(processedItems.map(i => i.id)));
+      }
       
       // Feedback positive
       setIsLoading(false);
@@ -1010,9 +1137,12 @@ export default function App() {
 
       setAlbumTitle(data.title || 'Álbum Importado');
       setAlbumSourceUrl(data.sourceUrl);
-      setMediaItems(mappedItems);
+      const processedItems = applyExtractionRules(mappedItems, extractionSettings);
+      setMediaItems(processedItems);
       setViewMode('viewer');
-      setSelectedIds(new Set(mappedItems.map((i: any) => i.id)));
+      if (extractionSettings.autoSelectImported) {
+        setSelectedIds(new Set(processedItems.map((i: any) => i.id)));
+      }
       
       // Add a message about resolving individual pages
       const unresCount = mappedItems.filter(i => !i.isResolved).length;
@@ -1707,6 +1837,21 @@ export default function App() {
             >
               <HelpCircle className="h-3.5 w-3.5" />
               Ajuda
+            </button>
+            <button
+              onClick={() => {
+                setViewMode('viewer');
+                setActiveTab('settings');
+              }}
+              id="nav-tab-settings"
+              className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all duration-200 ${
+                viewMode === 'viewer' && activeTab === 'settings'
+                  ? 'bg-indigo-600 text-white shadow'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/40'
+              }`}
+            >
+              <SlidersHorizontal className="h-3.5 w-3.5 text-indigo-400" />
+              Configurações
             </button>
           </nav>
         </div>
@@ -2695,6 +2840,223 @@ export default function App() {
                   )}
                 </div>
               )}
+
+              {/* Tab 8: Settings */}
+              {activeTab === 'settings' && (
+                <div className="flex flex-col gap-6 animate-in fade-in duration-200">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-850 pb-4">
+                    <div className="flex items-center gap-2.5">
+                      <div className="p-2 bg-indigo-500/10 border border-indigo-500/20 rounded-xl text-indigo-400">
+                        <SlidersHorizontal className="h-5 w-5" />
+                      </div>
+                      <div>
+                        <h3 className="text-sm font-extrabold tracking-wide uppercase text-slate-200">
+                          Preferências & Configurações de Extração
+                        </h3>
+                        <p className="text-xs text-slate-400">
+                          Escolha quais formatos de arquivo priorizar e como ordenar mídias extraídas do Bunkr/BAlbums.
+                        </p>
+                      </div>
+                    </div>
+                    
+                    {mediaItems.length > 0 && (
+                      <button
+                        onClick={handleReorganizeCurrentAlbum}
+                        className="bg-indigo-600 hover:bg-indigo-500 active:scale-[0.98] text-white text-xs font-bold px-3.5 py-2 rounded-xl shadow flex items-center gap-1.5 transition shrink-0"
+                      >
+                        <Sparkles className="h-3.5 w-3.5 text-amber-300" />
+                        Reorganizar Álbum Atual ({mediaItems.length})
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Section 1: Video Format Priority */}
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs font-extrabold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+                        <VideoIcon className="h-4 w-4 text-indigo-400" />
+                        Formato de Vídeo Prioritário
+                      </label>
+                      <span className="text-[10px] text-slate-400 bg-slate-900 border border-slate-800 px-2 py-0.5 rounded font-mono">
+                        Prioridade: .{extractionSettings.preferredVideoFormat.toUpperCase()}
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-5 gap-2.5">
+                      {[
+                        { id: 'mp4', name: '.MP4', desc: 'Compatibilidade universal (Navegador, Celular, TV)', icon: '🎬', recommended: true },
+                        { id: 'mkv', name: '.MKV', desc: 'Alta qualidade e faixas de áudio/legenda', icon: '📽️' },
+                        { id: 'webm', name: '.WEBM', desc: 'Otimizado para web e streaming', icon: '🌐' },
+                        { id: 'mov', name: '.MOV', desc: 'Formato nativo QuickTime Apple', icon: '📱' },
+                        { id: 'any', name: 'Qualquer', desc: 'Manter ordem original sem priorização', icon: '🔀' },
+                      ].map((fmt) => (
+                        <button
+                          key={fmt.id}
+                          onClick={() => setExtractionSettings(s => ({ ...s, preferredVideoFormat: fmt.id as any }))}
+                          className={`p-3 rounded-2xl border text-left flex flex-col justify-between gap-2 transition duration-200 ${
+                            extractionSettings.preferredVideoFormat === fmt.id
+                              ? 'bg-indigo-950/70 border-indigo-500/80 text-white shadow-lg ring-1 ring-indigo-500/50'
+                              : 'bg-slate-950/60 border-slate-850 hover:border-slate-750 text-slate-300 hover:bg-slate-900/50'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between w-full">
+                            <span className="text-base">{fmt.icon}</span>
+                            {extractionSettings.preferredVideoFormat === fmt.id ? (
+                              <Check className="h-4 w-4 text-indigo-400" />
+                            ) : fmt.recommended ? (
+                              <span className="text-[9px] bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 px-1.5 py-0.5 rounded font-bold">
+                                Padrão
+                              </span>
+                            ) : null}
+                          </div>
+                          <div>
+                            <span className="text-xs font-bold block text-slate-200">{fmt.name}</span>
+                            <span className="text-[10px] text-slate-400 leading-tight block mt-0.5">{fmt.desc}</span>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Section 2: Image Format Priority */}
+                  <div className="space-y-3 pt-2">
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs font-extrabold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+                        <ImageIcon className="h-4 w-4 text-emerald-400" />
+                        Formato de Imagem Prioritário
+                      </label>
+                      <span className="text-[10px] text-slate-400 bg-slate-900 border border-slate-800 px-2 py-0.5 rounded font-mono">
+                        Prioridade: .{extractionSettings.preferredImageFormat.toUpperCase()}
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-2.5">
+                      {[
+                        { id: 'jpg', name: '.JPG / .JPEG', desc: 'Fotos e capturas universais', icon: '🖼️', recommended: true },
+                        { id: 'png', name: '.PNG', desc: 'Sem perda e suporte a transparência', icon: '🎨' },
+                        { id: 'webp', name: '.WEBP', desc: 'Compacto e rápido para navegação web', icon: '⚡' },
+                        { id: 'any', name: 'Qualquer', desc: 'Manter ordem original sem priorização', icon: '🔀' },
+                      ].map((fmt) => (
+                        <button
+                          key={fmt.id}
+                          onClick={() => setExtractionSettings(s => ({ ...s, preferredImageFormat: fmt.id as any }))}
+                          className={`p-3 rounded-2xl border text-left flex flex-col justify-between gap-2 transition duration-200 ${
+                            extractionSettings.preferredImageFormat === fmt.id
+                              ? 'bg-emerald-950/70 border-emerald-500/80 text-white shadow-lg ring-1 ring-emerald-500/50'
+                              : 'bg-slate-950/60 border-slate-850 hover:border-slate-750 text-slate-300 hover:bg-slate-900/50'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between w-full">
+                            <span className="text-base">{fmt.icon}</span>
+                            {extractionSettings.preferredImageFormat === fmt.id ? (
+                              <Check className="h-4 w-4 text-emerald-400" />
+                            ) : fmt.recommended ? (
+                              <span className="text-[9px] bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-1.5 py-0.5 rounded font-bold">
+                                Padrão
+                              </span>
+                            ) : null}
+                          </div>
+                          <div>
+                            <span className="text-xs font-bold block text-slate-200">{fmt.name}</span>
+                            <span className="text-[10px] text-slate-400 leading-tight block mt-0.5">{fmt.desc}</span>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Section 3: Extraction Rules */}
+                  <div className="space-y-3 pt-2">
+                    <label className="text-xs font-extrabold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+                      <SlidersHorizontal className="h-4 w-4 text-purple-400" />
+                      Regras Automáticas de Extração
+                    </label>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <label className="flex items-start gap-3 p-3.5 bg-slate-950 border border-slate-850 hover:border-slate-750 rounded-2xl cursor-pointer transition">
+                        <input
+                          type="checkbox"
+                          checked={extractionSettings.sortByFormatPriority}
+                          onChange={(e) => setExtractionSettings(s => ({ ...s, sortByFormatPriority: e.target.checked }))}
+                          className="mt-0.5 h-4 w-4 rounded border-slate-700 bg-slate-900 text-indigo-600 focus:ring-indigo-500"
+                        />
+                        <div>
+                          <span className="text-xs font-bold text-slate-200 block">Reorganizar Mídias por Prioridade</span>
+                          <span className="text-[11px] text-slate-400 leading-relaxed block mt-0.5">
+                            Coloca automaticamente os vídeos do seu formato preferido no topo da lista durante a raspagem.
+                          </span>
+                        </div>
+                      </label>
+
+                      <label className="flex items-start gap-3 p-3.5 bg-slate-950 border border-slate-850 hover:border-slate-750 rounded-2xl cursor-pointer transition">
+                        <input
+                          type="checkbox"
+                          checked={extractionSettings.filterUnwantedExtensions}
+                          onChange={(e) => setExtractionSettings(s => ({ ...s, filterUnwantedExtensions: e.target.checked }))}
+                          className="mt-0.5 h-4 w-4 rounded border-slate-700 bg-slate-900 text-indigo-600 focus:ring-indigo-500"
+                        />
+                        <div>
+                          <span className="text-xs font-bold text-slate-200 block">Filtrar Arquivos Não-Mídia</span>
+                          <span className="text-[11px] text-slate-400 leading-relaxed block mt-0.5">
+                            Remove automaticamente scripts, HTMLs, executáveis e documentos irrelevantes da lista.
+                          </span>
+                        </div>
+                      </label>
+
+                      <label className="flex items-start gap-3 p-3.5 bg-slate-950 border border-slate-850 hover:border-slate-750 rounded-2xl cursor-pointer transition">
+                        <input
+                          type="checkbox"
+                          checked={extractionSettings.autoSelectImported}
+                          onChange={(e) => setExtractionSettings(s => ({ ...s, autoSelectImported: e.target.checked }))}
+                          className="mt-0.5 h-4 w-4 rounded border-slate-700 bg-slate-900 text-indigo-600 focus:ring-indigo-500"
+                        />
+                        <div>
+                          <span className="text-xs font-bold text-slate-200 block">Selecionar Tudo ao Importar</span>
+                          <span className="text-[11px] text-slate-400 leading-relaxed block mt-0.5">
+                            Marca automaticamente todas as mídias extraídas para download ao carregar um novo álbum.
+                          </span>
+                        </div>
+                      </label>
+
+                      <label className="flex items-start gap-3 p-3.5 bg-slate-950 border border-slate-850 hover:border-slate-750 rounded-2xl cursor-pointer transition">
+                        <input
+                          type="checkbox"
+                          checked={extractionSettings.resolveDirectLinks}
+                          onChange={(e) => setExtractionSettings(s => ({ ...s, resolveDirectLinks: e.target.checked }))}
+                          className="mt-0.5 h-4 w-4 rounded border-slate-700 bg-slate-900 text-indigo-600 focus:ring-indigo-500"
+                        />
+                        <div>
+                          <span className="text-xs font-bold text-slate-200 block">Converter Links para Servidores CDN</span>
+                          <span className="text-[11px] text-slate-400 leading-relaxed block mt-0.5">
+                            Redireciona e reescreve links de páginas do Bunkr para URLs diretas de alta velocidade em <code className="text-indigo-400 font-mono">media-files.bunkr.cr</code>.
+                          </span>
+                        </div>
+                      </label>
+                    </div>
+                  </div>
+
+                  {/* Footer actions */}
+                  <div className="flex items-center justify-between pt-4 border-t border-slate-850/80">
+                    <button
+                      onClick={() => {
+                        setExtractionSettings(DEFAULT_EXTRACTION_SETTINGS);
+                        setSuccessMessage('Configurações restauradas para o padrão!');
+                        setTimeout(() => setSuccessMessage(''), 3000);
+                      }}
+                      className="text-xs text-slate-500 hover:text-slate-300 font-semibold px-3 py-1.5 rounded-xl hover:bg-slate-900 transition flex items-center gap-1.5"
+                    >
+                      <RefreshCw className="h-3.5 w-3.5" />
+                      Restaurar Padrões
+                    </button>
+
+                    {mediaItems.length > 0 && (
+                      <span className="text-xs text-slate-400">
+                        💡 Há <strong>{mediaItems.length} mídias</strong> carregadas. Clique no botão de topo para aplicar as novas regras agora.
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Active Download Status Panel (shows when active downloading) */}
@@ -2895,7 +3257,19 @@ export default function App() {
                     </div>
 
                     {mediaItems.length > 0 && (
-                      <div className="flex justify-end">
+                      <div className="flex items-center justify-between gap-2">
+                        <button
+                          onClick={() => {
+                            setViewMode('viewer');
+                            setActiveTab('settings');
+                          }}
+                          className="text-indigo-400 hover:text-indigo-300 text-xs font-semibold px-3 py-1.5 rounded-xl bg-indigo-950/30 hover:bg-indigo-900/40 border border-indigo-500/20 transition duration-150 flex items-center gap-1.5"
+                          title="Abrir Configurações de Formato Prioritário"
+                        >
+                          <SlidersHorizontal className="h-3.5 w-3.5 text-indigo-400" />
+                          <span>Prioridade: <strong className="text-white font-mono">.{extractionSettings.preferredVideoFormat.toUpperCase()}</strong> | <strong className="text-white font-mono">.{extractionSettings.preferredImageFormat.toUpperCase()}</strong></span>
+                        </button>
+
                         <button
                           onClick={() => setMediaItems([])}
                           className="text-slate-500 hover:text-red-400 text-xs font-semibold px-3 py-1.5 rounded-xl hover:bg-red-500/10 border border-transparent hover:border-red-500/20 transition duration-150"
