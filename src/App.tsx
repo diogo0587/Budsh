@@ -56,7 +56,7 @@ interface SavedAlbum {
   savedAt: string;
 }
 
-// Helper to rewrite old or dead Bunkr domains to the active working domain (bunkr.cr)
+// Helper to rewrite old or dead Bunkr domains to active working domains (bunkr.cr / media-files.bunkr.cr)
 const rewriteBunkrUrl = (urlStr: string): string => {
   if (!urlStr) return '';
   const trimmed = urlStr.trim();
@@ -67,21 +67,34 @@ const rewriteBunkrUrl = (urlStr: string): string => {
     const urlObj = new URL(trimmed);
     const hostname = urlObj.hostname.toLowerCase();
     
-    // Rewrite bunkr domains to .cr
-    if (hostname.includes('bunkr') && !hostname.endsWith('.cr')) {
-      let newHostname = hostname;
-      if (hostname.includes('bunkr-albums.io')) {
-        newHostname = hostname.replace('bunkr-albums.io', 'bunkr.cr');
-      } else {
-        newHostname = hostname.replace(/bunkr\.[a-z0-9]{2,6}/g, 'bunkr.cr');
-      }
-      urlObj.hostname = newHostname;
+    // Handle media-files (e.g. media-files.bunkr.is, media-files.bunkr.ru, media-files.cr, etc.)
+    if (hostname.includes('media-files')) {
+      urlObj.hostname = 'media-files.bunkr.cr';
       return urlObj.toString();
     }
 
-    // Rewrite media-files domains to .cr
-    if (hostname.includes('media-files') && !hostname.endsWith('.cr')) {
-      urlObj.hostname = hostname.replace(/media-files\.[a-z0-9]{2,6}/g, 'media-files.cr');
+    // Handle any Bunkr or Bunkrr domain variant (.cr, .is, .ru, .si, .la, .ph, .site, .ws, .red, .black, .art, .sk, .pk, .ca, .ax, .fi, .to, .ac, .se, .ci, .cat, .d, .pm, .app, .click, .one, .media, .st, .club, .asia, .org, .net, .io, etc.)
+    if (hostname.includes('bunkr') || hostname.includes('bunkrr')) {
+      if (hostname.startsWith('get.')) {
+        urlObj.hostname = 'get.bunkr.cr';
+      } else if (hostname.startsWith('cdn')) {
+        const cdnMatch = hostname.match(/^(cdn\d*)\./i);
+        if (cdnMatch) {
+          urlObj.hostname = `${cdnMatch[1]}.bunkr.cr`;
+        } else {
+          urlObj.hostname = 'cdn.bunkr.cr';
+        }
+      } else if (hostname.startsWith('storage.')) {
+        urlObj.hostname = 'storage.bunkr.cr';
+      } else {
+        urlObj.hostname = 'bunkr.cr';
+      }
+      return urlObj.toString();
+    }
+
+    // Handle balbums or bunkr-albums
+    if (hostname.includes('balbum') || hostname.includes('bunkr-albums')) {
+      urlObj.hostname = 'balbums.st';
       return urlObj.toString();
     }
   } catch (e) {
@@ -105,7 +118,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<'url' | 'html' | 'saved' | 'help' | 'bookmarklet' | 'webview' | 'history'>('url');
 
   // Download History
-  const [downloadHistory, setDownloadHistory] = useState<(MediaItem & { downloadedAt: Date })[]>([]);
+  const [downloadHistory, setDownloadHistory] = useState<(MediaItem & { downloadedAt: Date, status: 'success' | 'failed' })[]>([]);
 
   // Input states
   const [inputUrl, setInputUrl] = useState('');
@@ -127,7 +140,6 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
-  const [cloudflareBlock, setCloudflareBlock] = useState(false);
 
   // Filters and Selection
   const [searchQuery, setSearchQuery] = useState('');
@@ -342,8 +354,8 @@ export default function App() {
         const lowerHref = absoluteUrl.toLowerCase();
         
         // Is it a direct media file, or a viewing page?
-        const isMediaFile = /\.(mp4|mkv|mov|webm|avi|jpg|jpeg|png|webp|gif|mp3|wav|ogg)$/.test(lowerHref);
-        const isViewPage = /\/(v|i)\/[a-zA-Z0-9]+/.test(lowerHref);
+        const isMediaFile = /\.(mp4|mkv|mov|webm|avi|m4v|flv|wmv|ts|3gp|jpg|jpeg|png|webp|gif|mp3|wav|ogg)($|\?)/i.test(lowerHref);
+        const isViewPage = /\/(v|i|d|f|file|view|watch|download)\/[a-zA-Z0-9_\-\.]+/i.test(lowerHref);
 
         if (isMediaFile || isViewPage) {
           if (seenUrls.has(absoluteUrl)) return;
@@ -360,23 +372,27 @@ export default function App() {
           }
           if (!name) {
             try {
-              const parts = absoluteUrl.split('/');
+              const parts = absoluteUrl.split('?')[0].split('/');
               name = parts[parts.length - 1] || `file_${idx}`;
             } catch (e) {
               name = `file_${idx}`;
             }
           }
 
-          // Determine type
-          const type = /\.(mp4|mkv|mov|webm|avi)$/.test(lowerHref) || (isViewPage && lowerHref.includes('/v/')) ? 'video' : 'image';
+          const isVideo = lowerHref.includes('/v/') || /\.(mp4|mkv|mov|webm|avi|m4v|flv|wmv|ts|3gp)($|\?)/i.test(lowerHref) || lowerHref.includes('video');
+          if (isVideo && !/\.(mp4|mkv|mov|webm|avi|m4v|flv|wmv|ts|3gp)$/i.test(name)) {
+            name += '.mp4';
+          }
+
+          const isDirectCdn = /media-files|get\.bunkr|cdn[0-9]*\.bunkr|storage/i.test(absoluteUrl);
 
           items.push({
             id: `webview_item_${idx}_${Math.random().toString(36).substr(2, 5)}`,
             url: absoluteUrl,
             name: name,
-            type: type,
+            type: isVideo ? 'video' : 'image',
             size: 'Desconhecido',
-            isResolved: isMediaFile
+            isResolved: isMediaFile || isDirectCdn
           });
         }
       });
@@ -491,24 +507,12 @@ export default function App() {
         } else {
           const text = await response.text();
           console.error('Expected JSON, got text/html:', text);
-          if (text.toLowerCase().includes('cloudflare') || response.status === 403) {
-            setCloudflareBlock(true);
-            setErrorMessage('Bloqueio do Cloudflare detectado. Por favor, utilize o método de copiar e colar o código HTML da página.');
-            setActiveTab('html');
-          } else {
-            setErrorMessage(`Falha ao obter dados do servidor (Status ${response.status}). Por favor, tente novamente ou utilize o método manual.`);
-          }
+          setErrorMessage(`Falha ao obter dados do servidor (Status ${response.status}). Por favor, tente novamente ou utilize o método manual.`);
           return;
         }
 
         if (!response.ok || data.error) {
-          if (data.error === 'CF_BLOCK') {
-            setCloudflareBlock(true);
-            setErrorMessage(data.message || 'Bloqueio do Cloudflare detectado. Por favor, utilize o método de copiar e colar o código HTML da página.');
-            setActiveTab('html');
-          } else {
-            setErrorMessage(data.message || 'Falha ao buscar álbuns da URL.');
-          }
+          setErrorMessage(data.message || 'Falha ao buscar álbuns da URL.');
           return;
         }
 
@@ -608,7 +612,6 @@ export default function App() {
 
     setIsLoading(true);
     setErrorMessage('');
-    setCloudflareBlock(false);
 
     try {
       const parser = new DOMParser();
@@ -650,6 +653,98 @@ export default function App() {
         }
       }
 
+      // Strategy 0: Parse Next.js __NEXT_DATA__ or embedded JSON if available
+      const scriptTags = Array.from(doc.querySelectorAll('script'));
+      for (const script of scriptTags) {
+        const text = script.textContent || '';
+        if (text.includes('__NEXT_DATA__') || text.includes('"props"') || text.includes('"files"') || text.includes('"media"')) {
+          try {
+            const jsonStart = text.indexOf('{');
+            const jsonEnd = text.lastIndexOf('}');
+            if (jsonStart !== -1 && jsonEnd !== -1) {
+              const data = JSON.parse(text.substring(jsonStart, jsonEnd + 1));
+              const traverse = (obj: any) => {
+                if (!obj || typeof obj !== 'object') return;
+                if (Array.isArray(obj)) {
+                  obj.forEach(traverse);
+                  return;
+                }
+                const name = obj.name || obj.title || obj.originalName || obj.filename;
+                const media = obj.media || obj.cdn || obj.file || obj.src || obj.downloadUrl || obj.directUrl;
+                const url = obj.url || obj.link || obj.path || obj.slug;
+                const type = obj.type || obj.mimeType || obj.extension || obj.ext || '';
+                const sizeBytes = obj.size || obj.fileSize || obj.bytes;
+
+                let fileUrl = media || url;
+                if (typeof fileUrl === 'string' && fileUrl.length > 3) {
+                  const isMedia = /\.(mp4|mkv|mov|webm|avi|m4v|flv|wmv|ts|3gp|jpg|jpeg|png|webp|gif)/i.test(fileUrl) ||
+                                  /media-files|get\.bunkr|cdn[0-9]*\.bunkr|storage/i.test(fileUrl);
+                  const isView = /\/(v|i|d|f|file|view|watch|download)\//i.test(fileUrl);
+
+                  if (isMedia || isView) {
+                    let fullUrl = fileUrl;
+                    if (fullUrl.startsWith('//')) fullUrl = 'https:' + fullUrl;
+                    else if (fullUrl.startsWith('/')) fullUrl = detectedBaseUrl + fullUrl;
+
+                    fullUrl = rewriteBunkrUrl(fullUrl);
+
+                    if (!seenUrls.has(fullUrl)) {
+                      seenUrls.add(fullUrl);
+
+                      let isVideo = /\.(mp4|mkv|mov|webm|avi|m4v|flv|wmv|ts|3gp)/i.test(fullUrl) ||
+                                    (typeof name === 'string' && /\.(mp4|mkv|mov|webm|avi|m4v|flv|wmv|ts|3gp)/i.test(name)) ||
+                                    (typeof type === 'string' && type.includes('video')) ||
+                                    fullUrl.includes('/v/');
+
+                      let fileName = typeof name === 'string' ? name : '';
+                      if (!fileName) {
+                        try {
+                          const parts = fullUrl.split('?')[0].split('/');
+                          fileName = decodeURIComponent(parts[parts.length - 1]);
+                        } catch(e) {
+                          fileName = isVideo ? 'video.mp4' : 'file';
+                        }
+                      }
+
+                      if (isVideo && !/\.(mp4|mkv|mov|webm|avi|m4v|flv|wmv|ts|3gp)$/i.test(fileName)) {
+                        fileName += '.mp4';
+                      }
+
+                      let formattedSize = 'Desconhecido';
+                      if (typeof sizeBytes === 'number' && sizeBytes > 0) {
+                        if (sizeBytes > 1024 * 1024 * 1024) {
+                          formattedSize = `${(sizeBytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+                        } else if (sizeBytes > 1024 * 1024) {
+                          formattedSize = `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
+                        } else if (sizeBytes > 1024) {
+                          formattedSize = `${(sizeBytes / 1024).toFixed(0)} KB`;
+                        }
+                      } else if (typeof sizeBytes === 'string') {
+                        formattedSize = sizeBytes;
+                      }
+
+                      const isDirectCdn = /media-files|get\.bunkr|cdn[0-9]*\.bunkr|storage/i.test(fullUrl) ||
+                                          /\.(mp4|mkv|mov|webm|avi|jpg|jpeg|png|webp|gif)/i.test(fullUrl);
+
+                      items.push({
+                        id: `json_${items.length}_${Math.random().toString(36).substr(2, 5)}`,
+                        url: fullUrl,
+                        name: fileName,
+                        type: isVideo ? 'video' : 'image',
+                        size: formattedSize,
+                        isResolved: isDirectCdn
+                      });
+                    }
+                  }
+                }
+                Object.values(obj).forEach(traverse);
+              };
+              traverse(data);
+            }
+          } catch (e) {}
+        }
+      }
+
       // Strategy 1: Look for bunkr-style or general file grid items
       // Usually they have cards, paragraphs, or anchor links with filenames
       const links = doc.querySelectorAll('a');
@@ -671,8 +766,8 @@ export default function App() {
         const lowerHref = absoluteUrl.toLowerCase();
         
         // Is it a direct media file, or a viewing page?
-        const isMediaFile = /\.(mp4|mkv|mov|webm|avi|jpg|jpeg|png|webp|gif|mp3|wav|ogg)$/.test(lowerHref);
-        const isViewPage = /\/(v|i)\/[a-zA-Z0-9]+/.test(lowerHref);
+        const isMediaFile = /\.(mp4|mkv|mov|webm|avi|m4v|flv|wmv|ts|3gp|jpg|jpeg|png|webp|gif|mp3|wav|ogg)($|\?)/i.test(lowerHref);
+        const isViewPage = /\/(v|i|d|f|file|view|watch|download)\/[a-zA-Z0-9_\-\.]+/i.test(lowerHref);
 
         if (isMediaFile || isViewPage) {
           // Avoid duplicate links
@@ -691,15 +786,23 @@ export default function App() {
           if (!name) {
             // derive from URL
             try {
-              const parts = absoluteUrl.split('/');
+              const parts = absoluteUrl.split('?')[0].split('/');
               const filePart = parts[parts.length - 1];
               if (filePart && filePart.includes('.')) {
                 name = decodeURIComponent(filePart);
               }
             } catch (e) {}
           }
+
+          const isVideo = lowerHref.includes('/v/') || /\.(mp4|mkv|mov|webm|avi|m4v|flv|wmv|ts|3gp)($|\?)/i.test(lowerHref) || lowerHref.includes('video');
+          const isImage = lowerHref.includes('/i/') || /\.(jpg|jpeg|png|webp|gif)($|\?)/i.test(lowerHref);
+
           if (!name) {
-            name = `arquivo_${idx + 1}`;
+            name = isVideo ? `video_${idx + 1}.mp4` : `arquivo_${idx + 1}`;
+          }
+
+          if (isVideo && !/\.(mp4|mkv|mov|webm|avi|m4v|flv|wmv|ts|3gp)$/i.test(name)) {
+            name += '.mp4';
           }
 
           // File Size: search for sibling text containing MB/KB
@@ -712,9 +815,6 @@ export default function App() {
               size = sizeMatch[1];
             }
           }
-
-          const isVideo = lowerHref.includes('/v/') || /\.(mp4|mkv|mov|webm|avi)$/.test(lowerHref);
-          const isImage = lowerHref.includes('/i/') || /\.(jpg|jpeg|png|webp|gif)$/.test(lowerHref);
 
           // Infer thumbnail if any
           let thumbnailUrl = imgChild?.getAttribute('src') || undefined;
@@ -729,6 +829,8 @@ export default function App() {
             thumbnailUrl = rewriteBunkrUrl(thumbnailUrl);
           }
 
+          const isDirectCdn = /media-files|get\.bunkr|cdn[0-9]*\.bunkr|storage/i.test(absoluteUrl);
+
           items.push({
             id: `html_${idx}_${Math.random().toString(36).substr(2, 5)}`,
             url: absoluteUrl,
@@ -736,7 +838,7 @@ export default function App() {
             type: isVideo ? 'video' : (isImage ? 'image' : 'other'),
             size: size,
             thumbnailUrl: thumbnailUrl,
-            isResolved: isMediaFile
+            isResolved: isMediaFile || isDirectCdn
           });
         }
       });
@@ -868,7 +970,6 @@ export default function App() {
 
     setIsLoading(true);
     setErrorMessage('');
-    setCloudflareBlock(false);
     setMediaItems([]);
 
     try {
@@ -882,22 +983,11 @@ export default function App() {
       } else {
         const text = await response.text();
         console.error('Expected JSON, got non-JSON response:', text);
-        if (text.toLowerCase().includes('cloudflare') || response.status === 403) {
-          data = { error: 'CF_BLOCK', message: 'Bloqueio do Cloudflare detectado. Por favor, utilize o método de copiar e colar o código HTML da página.' };
-        } else {
-          throw new Error('Formato de resposta inválido do servidor de raspagem. Verifique a URL ou utilize o método manual.');
-        }
+        throw new Error('Formato de resposta inválido do servidor de raspagem. Verifique a URL ou utilize o método manual.');
       }
 
       if (!response.ok || data.error) {
-        if (data.error === 'CF_BLOCK') {
-          setCloudflareBlock(true);
-          setErrorMessage(data.message || 'Bloqueio do Cloudflare detectado. Por favor, utilize o método de copiar e colar o código HTML da página.');
-          // Auto switch to HTML tab so user can paste
-          setActiveTab('html');
-        } else {
-          setErrorMessage(data.message || 'Falha ao buscar álbuns da URL.');
-        }
+        setErrorMessage(data.message || 'Falha ao buscar álbuns da URL.');
         setIsLoading(false);
         return;
       }
@@ -1020,11 +1110,12 @@ export default function App() {
           
           count++;
           setDownloadedCount(count);
-          setDownloadHistory(prev => [{...item, downloadedAt: new Date()}, ...prev]);
+          setDownloadHistory(prev => [{...item, downloadedAt: new Date(), status: 'success'}, ...prev]);
           setDownloadProgress(Math.round((count / itemsToDownload.length) * 80)); // Max 80% for download phase
         } catch (error) {
           console.error(`Falha no download de ${item.name}:`, error);
           setFailedDownloads(prev => [...prev, item]);
+          setDownloadHistory(prev => [{...item, downloadedAt: new Date(), status: 'failed'}, ...prev]);
         }
       }));
     }
@@ -1106,6 +1197,7 @@ export default function App() {
       document.body.removeChild(link);
       
       setDownloadStatusText('Download iniciado pelo navegador com sucesso!');
+      setDownloadHistory(prev => [{...item, downloadedAt: new Date(), status: 'success'}, ...prev]);
       
       confetti({
         particleCount: 40,
@@ -1113,6 +1205,7 @@ export default function App() {
         origin: { y: 0.8 }
       });
     } catch (e: any) {
+      setDownloadHistory(prev => [{...item, downloadedAt: new Date(), status: 'failed'}, ...prev]);
       alert(`Falha no download direto: ${e.message}. Tente abrir o link e salvar manualmente.`);
     }
   };
@@ -1178,7 +1271,7 @@ export default function App() {
         
         count++;
         setDownloadedCount(count);
-        setDownloadHistory(prev => [{...item, downloadedAt: new Date()}, ...prev]);
+        setDownloadHistory(prev => [{...item, downloadedAt: new Date(), status: 'success'}, ...prev]);
         setDownloadProgress(Math.round((count / itemsToDownload.length) * 100));
         
         // Wait 400ms between streams to prevent browsers blocking popups or multiple downloads
@@ -1186,6 +1279,7 @@ export default function App() {
       } catch (error) {
         console.error(`Falha no download para ${item.name}:`, error);
         setFailedDownloads(prev => [...prev, item]);
+        setDownloadHistory(prev => [{...item, downloadedAt: new Date(), status: 'failed'}, ...prev]);
       }
     }
 
@@ -1330,6 +1424,12 @@ export default function App() {
     setActiveTab('url');
   };
 
+  // Helper to generate proxy media URL for inline playback / streaming
+  const getProxyMediaUrl = (mediaUrl: string) => {
+    if (!mediaUrl) return '';
+    return `/api/proxy-media?url=${encodeURIComponent(mediaUrl)}`;
+  };
+
   // Selection controls
   const handleToggleSelect = (id: string) => {
     const next = new Set(selectedIds);
@@ -1456,11 +1556,6 @@ export default function App() {
       extensions: Array.from(extensions).slice(0, 5),
       words: topWords
     };
-  };
-
-  // Format Proxy stream URL for custom video player
-  const getProxyMediaUrl = (url: string) => {
-    return `/api/proxy-media?url=${encodeURIComponent(url)}`;
   };
 
   // Simple size display helper
@@ -1627,29 +1722,6 @@ export default function App() {
             <div className="flex-1">
               <h4 className="text-sm font-bold text-rose-300">Atenção</h4>
               <p className="text-xs text-rose-200/90 mt-1 leading-relaxed">{errorMessage}</p>
-              {cloudflareBlock && (
-                <div className="mt-3 flex gap-2">
-                  <button
-                    onClick={() => {
-                      setActiveTab('html');
-                      setErrorMessage('');
-                    }}
-                    className="bg-rose-850 hover:bg-rose-800 text-rose-100 text-[11px] font-bold px-3 py-1.5 rounded-lg border border-rose-700/50 transition duration-150"
-                  >
-                    Ir para Colar HTML (Garantido)
-                  </button>
-                  {(albumSourceUrl || inputUrl) && (
-                    <a
-                      href={albumSourceUrl || inputUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="bg-transparent hover:bg-rose-900/40 text-rose-300 text-[11px] font-semibold px-3 py-1.5 rounded-lg border border-rose-800/50 flex items-center gap-1 transition duration-150"
-                    >
-                      Abrir Álbum Original <ExternalLink className="h-3 w-3" />
-                    </a>
-                  )}
-                </div>
-              )}
             </div>
           </div>
         )}
@@ -2090,7 +2162,7 @@ export default function App() {
                   {isWebviewLoading && (
                     <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm flex flex-col items-center justify-center gap-3">
                       <RefreshCw className="h-8 w-8 text-indigo-500 animate-spin" />
-                      <p className="text-xs font-bold text-slate-400 font-mono">Bypassando Cloudflare & Carregando...</p>
+                      <p className="text-xs font-bold text-slate-400 font-mono">Carregando...</p>
                     </div>
                   )}
                 </div>
@@ -2222,8 +2294,17 @@ export default function App() {
                     <h3 className="text-sm font-bold tracking-wide uppercase text-slate-300">Link de Álbum Direto</h3>
                   </div>
                   <p className="text-xs text-slate-400 leading-relaxed">
-                    Insira o link de um álbum do <strong>BAlbums</strong> ou <strong>Bunkr</strong> para importar as mídias. O servidor processará e contornará as proteções básicas de CORS.
+                    Insira o link de um álbum do <strong>BAlbums</strong> ou <strong>Bunkr</strong> para importar mídias. Compatível com todos os domínios do Bunkr.
                   </p>
+
+                  {/* Supported Domains Badge list */}
+                  <div className="flex flex-wrap gap-1 text-[10px]">
+                    {['.cr', '.is', '.ru', '.si', '.la', '.ph', '.site', '.ws', '.red', '.black', '.sk', '.pk', '.ca', '.fi', '.to', '.app', 'balbums.st'].map(ext => (
+                      <span key={ext} className="bg-indigo-950/40 text-indigo-300 border border-indigo-500/20 px-1.5 py-0.5 rounded font-mono font-semibold">
+                        {ext}
+                      </span>
+                    ))}
+                  </div>
 
                   <div className="space-y-1 mt-1">
                     <label className="text-[10px] uppercase tracking-wider font-extrabold text-slate-500">URL do Álbum</label>
@@ -2232,7 +2313,7 @@ export default function App() {
                         type="url"
                         value={inputUrl}
                         onChange={(e) => setInputUrl(e.target.value)}
-                        placeholder="https://balbums.st/a/... ou https://bunkr.is/a/..."
+                        placeholder="https://bunkr.cr/a/... ou bunkr.is / balbums.st"
                         className="w-full bg-slate-950 border border-slate-850 rounded-2xl py-3 pl-4 pr-10 text-xs text-slate-100 placeholder:text-slate-600 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition duration-150"
                       />
                       <button
@@ -2277,7 +2358,7 @@ export default function App() {
                     100% à prova de falhas
                   </span>
                   <p className="text-xs text-slate-400 leading-relaxed">
-                    Se o link direto falhar devido a bloqueio do Cloudflare, abra a página original no navegador, aperte <kbd className="bg-slate-950 px-1 py-0.5 rounded text-indigo-400 border border-slate-800 text-[10px]">Ctrl+U</kbd> para abrir o código fonte, copie tudo e cole no campo abaixo.
+                    Se o link direto falhar, abra a página original no navegador, aperte <kbd className="bg-slate-950 px-1 py-0.5 rounded text-indigo-400 border border-slate-800 text-[10px]">Ctrl+U</kbd> para abrir o código fonte, copie tudo e cole no campo abaixo.
                   </p>
 
                   <div className="bg-indigo-950/25 border border-indigo-900/40 rounded-xl p-3 text-[11px] text-slate-400 leading-relaxed flex items-start gap-2.5">
@@ -2372,7 +2453,7 @@ export default function App() {
                     <h3 className="text-sm font-bold tracking-wide uppercase text-slate-300">Auto-Captura Inteligente</h3>
                   </div>
                   <span className="bg-amber-500/10 text-amber-400 text-[10px] border border-amber-500/20 px-2.5 py-1 rounded-full font-bold self-start uppercase tracking-wider">
-                    Cloudflare Bypass & 100% Automático ⚡
+                    100% Automático ⚡
                   </span>
                   <p className="text-xs text-slate-400 leading-relaxed">
                     Evite o trabalho de copiar e colar códigos HTML. Use o nosso <strong>Favorito Inteligente (Bookmarklet)</strong> para enviar qualquer página de álbum diretamente para cá com <strong>apenas 1 clique</strong>!
@@ -2563,26 +2644,33 @@ export default function App() {
                             </div>
                             <div className="flex flex-col min-w-0">
                               <span className="text-xs font-semibold text-slate-300 truncate">{item.name}</span>
-                              <span className="text-[10px] text-slate-500">{item.downloadedAt.toLocaleTimeString()} - {item.size}</span>
+                              <div className="flex items-center gap-2">
+                                <span className={`text-[10px] font-bold ${item.status === 'failed' ? 'text-rose-400' : 'text-emerald-400'}`}>
+                                  {item.status === 'failed' ? 'Falhou' : 'Sucesso'}
+                                </span>
+                                <span className="text-[10px] text-slate-500">{item.downloadedAt.toLocaleTimeString()} - {item.size}</span>
+                              </div>
                             </div>
                           </div>
                           <div className="flex items-center gap-1">
-                            <button
-                              onClick={async () => {
-                                const directUrl = item.url;
-                                const finalDownloadUrl = `/api/proxy-media?url=${encodeURIComponent(directUrl)}&download=true&filename=${encodeURIComponent(item.name)}`;
-                                const link = document.createElement('a');
-                                link.href = finalDownloadUrl;
-                                link.download = item.name;
-                                document.body.appendChild(link);
-                                link.click();
-                                document.body.removeChild(link);
-                              }}
-                              className="p-1.5 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-indigo-400 transition"
-                              title="Repetir Download"
-                            >
-                              <Download className="h-4 w-4" />
-                            </button>
+                            {item.status === 'failed' && (
+                              <button
+                                onClick={() => handleDownloadSingle(item)}
+                                className="p-1.5 bg-rose-500/10 hover:bg-rose-500/20 rounded-lg text-rose-400 transition"
+                                title="Tentar Novamente (Individual)"
+                              >
+                                <RefreshCw className="h-4 w-4" />
+                              </button>
+                            )}
+                            {item.status === 'success' && (
+                              <button
+                                onClick={() => handleDownloadSingle(item)}
+                                className="p-1.5 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-indigo-400 transition"
+                                title="Baixar Novamente"
+                              >
+                                <Download className="h-4 w-4" />
+                              </button>
+                            )}
                             <a
                               href={item.url}
                               target="_blank"
@@ -2697,7 +2785,7 @@ export default function App() {
                   >
                     <span className="text-[10px] font-bold text-violet-400 uppercase tracking-wider block mb-1">Instruções</span>
                     <h5 className="text-xs font-bold text-slate-300 group-hover:text-violet-300 transition-colors">Guia de Uso Rápido</h5>
-                    <p className="text-[10px] text-slate-500 mt-1 leading-normal">Saiba como inspecionar e copiar o código HTML caso precise contornar o Cloudflare.</p>
+                    <p className="text-[10px] text-slate-500 mt-1 leading-normal">Saiba como inspecionar e copiar o código HTML se o link direto falhar.</p>
                   </div>
                 </div>
               </div>

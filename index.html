@@ -4,6 +4,15 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>BAlbums Premium Downloader</title>
+    <script>
+      // Suppress cross-origin Script errors from third-party iframes/scripts
+      window.addEventListener('error', (e) => {
+        if (e.message === 'Script error.') {
+          e.preventDefault();
+          e.stopPropagation();
+        }
+      });
+    </script>
   </head>
   <body class="bg-slate-950 text-slate-100">
     <div id="root"></div>
