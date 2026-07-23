@@ -30,7 +30,10 @@ import {
   Check,
   Globe,
   ArrowLeft,
-  History
+  History,
+  CheckCircle2,
+  ShieldCheck,
+  ShieldAlert
 } from 'lucide-react';
 import JSZip from 'jszip';
 import confetti from 'canvas-confetti';
@@ -120,6 +123,326 @@ const rewriteBunkrUrl = (urlStr: string): string => {
     // Return original if parsing fails
   }
   return trimmed;
+};
+
+// Interface for Real-Time URL Validation Result
+export interface UrlValidationResult {
+  isValid: boolean;
+  isSupported: boolean;
+  status: 'empty' | 'invalid_url' | 'unsupported_domain' | 'valid_album' | 'valid_item' | 'valid_media';
+  message: string;
+  detectedDomain?: string;
+  type?: 'album' | 'item' | 'media' | 'unknown';
+}
+
+// Real-time URL validation function for Bunkr / BAlbums scrapers
+export const validateScraperUrl = (rawUrl: string): UrlValidationResult => {
+  const trimmed = rawUrl.trim();
+  if (!trimmed) {
+    return {
+      isValid: false,
+      isSupported: false,
+      status: 'empty',
+      message: ''
+    };
+  }
+
+  let urlToCheck = trimmed;
+  if (!/^https?:\/\//i.test(urlToCheck)) {
+    urlToCheck = 'https://' + urlToCheck;
+  }
+
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(urlToCheck);
+  } catch {
+    return {
+      isValid: false,
+      isSupported: false,
+      status: 'invalid_url',
+      message: 'Sintaxe de URL inválida. Forneça um endereço web completo (ex: https://bunkr.cr/a/...)'
+    };
+  }
+
+  const hostname = parsedUrl.hostname.toLowerCase();
+  const pathname = parsedUrl.pathname.toLowerCase();
+
+  // Supported Bunkr domains, BAlbums domains, and CDN storage hostnames
+  const isBunkrDomain = hostname.includes('bunkr') || hostname.includes('bunkrr') || hostname.endsWith('.cr');
+  const isBalbumsDomain = hostname.includes('balbum') || hostname.includes('bunkr-albums');
+  const isCdnOrStorage = /media-files|get\.bunkr|cdn[0-9]*\.bunkr|storage/i.test(hostname);
+
+  const isSupportedDomain = isBunkrDomain || isBalbumsDomain || isCdnOrStorage;
+
+  const isAlbumPage = pathname.includes('/a/') || pathname.includes('/album/');
+  const isItemPage = /\/(v|i|d|f|file|view|watch|download)\//i.test(pathname);
+  const isDirectMedia = /\.(mp4|mkv|mov|webm|avi|m4v|flv|wmv|ts|3gp|jpg|jpeg|png|webp|gif|mp3|wav|ogg)($|\?)/i.test(pathname);
+
+  if (isSupportedDomain) {
+    if (isAlbumPage) {
+      return {
+        isValid: true,
+        isSupported: true,
+        status: 'valid_album',
+        type: 'album',
+        message: 'Link de Álbum Bunkr/BAlbums reconhecido',
+        detectedDomain: hostname
+      };
+    }
+    if (isItemPage) {
+      return {
+        isValid: true,
+        isSupported: true,
+        status: 'valid_item',
+        type: 'item',
+        message: 'Link de Mídia/Vídeo Individual reconhecido',
+        detectedDomain: hostname
+      };
+    }
+    if (isDirectMedia) {
+      return {
+        isValid: true,
+        isSupported: true,
+        status: 'valid_media',
+        type: 'media',
+        message: 'Link direto de arquivo CDN reconhecido',
+        detectedDomain: hostname
+      };
+    }
+    return {
+      isValid: true,
+      isSupported: true,
+      status: 'valid_album',
+      type: 'album',
+      message: `Domínio suportado (${hostname})`,
+      detectedDomain: hostname
+    };
+  }
+
+  // Check if non-Bunkr URL is a direct media file URL
+  if (isDirectMedia) {
+    return {
+      isValid: true,
+      isSupported: true,
+      status: 'valid_media',
+      type: 'media',
+      message: 'Link direto de mídia detectado',
+      detectedDomain: hostname
+    };
+  }
+
+  return {
+    isValid: true,
+    isSupported: false,
+    status: 'unsupported_domain',
+    message: `Domínio "${hostname}" não é suportado pelos scrapers automáticos do Bunkr/BAlbums.`,
+    detectedDomain: hostname
+  };
+};
+
+// Helper function to perform a direct DOM scan of HTML and extract primary media/video sources
+export const parseDocumentMedia = (htmlText: string, originalUrl: string): { title: string; items: MediaItem[] } => {
+  try {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(htmlText, 'text/html');
+
+    // Attempt to extract title
+    let extractedTitle = doc.querySelector('title')?.textContent?.replace(' - Bunkr', '').replace(' - BAlbums', '').trim() || 
+                         doc.querySelector('h1')?.textContent?.trim() || 
+                         doc.querySelector('.album-title')?.textContent?.trim() || 
+                         '';
+
+    const items: MediaItem[] = [];
+    const seenUrls = new Set<string>();
+
+    let detectedBaseUrl = 'https://bunkr.cr';
+    if (originalUrl) {
+      try {
+        detectedBaseUrl = new URL(originalUrl).origin;
+      } catch (e) {}
+    }
+
+    const canonical = doc.querySelector('link[rel="canonical"]')?.getAttribute('href') ||
+                      doc.querySelector('meta[property="og:url"]')?.getAttribute('content');
+    
+    if (canonical && (canonical.startsWith('http://') || canonical.startsWith('https://'))) {
+      try {
+        const u = new URL(canonical);
+        detectedBaseUrl = u.origin;
+      } catch (e) {}
+    }
+
+    const resolveUrl = (rawSrc: string): string => {
+      let absoluteUrl = rawSrc.trim();
+      if (absoluteUrl.startsWith('//')) {
+        absoluteUrl = 'https:' + absoluteUrl;
+      } else if (absoluteUrl.startsWith('/')) {
+        absoluteUrl = detectedBaseUrl + absoluteUrl;
+      } else if (!absoluteUrl.startsWith('http://') && !absoluteUrl.startsWith('https://')) {
+        absoluteUrl = detectedBaseUrl + '/' + absoluteUrl;
+      }
+      return rewriteBunkrUrl(absoluteUrl);
+    };
+
+    // PRIORITY 1: Direct <video> elements and <source> tags
+    const videoElements = doc.querySelectorAll('video, video source, source[type*="video"]');
+    videoElements.forEach((vid, idx) => {
+      const src = vid.getAttribute('src') || vid.getAttribute('data-src') || vid.getAttribute('data-url');
+      if (!src || src.startsWith('blob:') || src.startsWith('data:')) return;
+
+      const resolvedUrl = resolveUrl(src);
+      if (seenUrls.has(resolvedUrl)) return;
+      seenUrls.add(resolvedUrl);
+
+      let name = doc.querySelector('h1')?.textContent?.trim() ||
+                 doc.querySelector('.filename, .file-name, .title')?.textContent?.trim() ||
+                 '';
+      if (!name && originalUrl) {
+        name = originalUrl.split('/').pop()?.split('?')[0] || '';
+      }
+      if (!name || name.length < 3) {
+        name = `video_${idx + 1}.mp4`;
+      }
+      if (!/\.(mp4|mkv|mov|webm|avi|m4v|flv|wmv|ts|3gp)$/i.test(name)) {
+        name += '.mp4';
+      }
+
+      items.push({
+        id: `dom_vid_${idx}_${Math.random().toString(36).substr(2, 5)}`,
+        url: resolvedUrl,
+        name: name,
+        type: 'video',
+        size: 'Desconhecido',
+        isResolved: true
+      });
+    });
+
+    // PRIORITY 2: OpenGraph / Meta video tags (Check ONLY if no video was found in Priority 1)
+    const hasDirectVideoTag = items.some(i => i.type === 'video');
+    if (!hasDirectVideoTag) {
+      const metaVideoSrc = doc.querySelector('meta[property="og:video"]')?.getAttribute('content') ||
+                           doc.querySelector('meta[property="og:video:url"]')?.getAttribute('content') ||
+                           doc.querySelector('meta[property="og:video:secure_url"]')?.getAttribute('content') ||
+                           doc.querySelector('meta[name="twitter:player:stream"]')?.getAttribute('content');
+
+      if (metaVideoSrc) {
+        const resolvedUrl = resolveUrl(metaVideoSrc);
+        if (!seenUrls.has(resolvedUrl)) {
+          seenUrls.add(resolvedUrl);
+          let name = originalUrl ? (originalUrl.split('/').pop()?.split('?')[0] || 'video.mp4') : 'video.mp4';
+          if (!/\.(mp4|mkv|mov|webm|avi|m4v|flv|wmv|ts|3gp)$/i.test(name)) name += '.mp4';
+          items.push({
+            id: `dom_meta_vid_${Math.random().toString(36).substr(2, 5)}`,
+            url: resolvedUrl,
+            name: name,
+            type: 'video',
+            size: 'Desconhecido',
+            isResolved: true
+          });
+        }
+      }
+    }
+
+    // PRIORITY 3: Script tags & embedded JSON inspection (Check ONLY if Priorities 1 and 2 yielded no videos)
+    const hasAnyVideoSoFar = items.some(i => i.type === 'video');
+    if (!hasAnyVideoSoFar) {
+      const scriptTags = doc.querySelectorAll('script');
+      scriptTags.forEach((script) => {
+        const content = script.textContent || '';
+        if (!content) return;
+
+        const matches = content.match(/https?:\/\/[^\s"'\\]+\.(?:mp4|mkv|mov|webm|m3u8)[^\s"'\\]*/gi);
+        if (matches) {
+          matches.forEach((vUrl, idx) => {
+            const cleanedUrl = resolveUrl(vUrl.replace(/\\/g, ''));
+            if (!seenUrls.has(cleanedUrl)) {
+              seenUrls.add(cleanedUrl);
+              let name = originalUrl ? (originalUrl.split('/').pop()?.split('?')[0] || `video_${idx + 1}.mp4`) : `video_${idx + 1}.mp4`;
+              if (!/\.(mp4|mkv|mov|webm|avi|m4v|flv|wmv|ts|3gp)$/i.test(name)) name += '.mp4';
+              items.push({
+                id: `dom_script_vid_${idx}_${Math.random().toString(36).substr(2, 5)}`,
+                url: cleanedUrl,
+                name: name,
+                type: 'video',
+                size: 'Desconhecido',
+                isResolved: true
+              });
+            }
+          });
+        }
+      });
+    }
+
+    // PRIORITY 4: Anchor <a> tags for album pages or file grid lists
+    const links = doc.querySelectorAll('a');
+    links.forEach((link, idx) => {
+      const href = link.getAttribute('href');
+      if (!href || href.startsWith('javascript:') || href.startsWith('#')) return;
+
+      const absoluteUrl = resolveUrl(href);
+      const lowerHref = absoluteUrl.toLowerCase();
+      
+      const isMediaFile = /\.(mp4|mkv|mov|webm|avi|m4v|flv|wmv|ts|3gp|jpg|jpeg|png|webp|gif|mp3|wav|ogg)($|\?)/i.test(lowerHref);
+      const isViewPage = /\/(v|i|d|f|file|view|watch|download)\/[a-zA-Z0-9_\-\.]+/i.test(lowerHref);
+
+      if (isMediaFile || isViewPage) {
+        if (seenUrls.has(absoluteUrl)) return;
+        seenUrls.add(absoluteUrl);
+
+        let name = '';
+        const imgChild = link.querySelector('img');
+        if (imgChild) {
+          name = imgChild.getAttribute('alt') || imgChild.getAttribute('title') || '';
+        }
+        if (!name) {
+          name = link.getAttribute('title') || link.textContent?.trim() || '';
+        }
+        if (!name) {
+          try {
+            const parts = absoluteUrl.split('?')[0].split('/');
+            name = parts[parts.length - 1] || `file_${idx}`;
+          } catch (e) {
+            name = `file_${idx}`;
+          }
+        }
+
+        const isVideo = lowerHref.includes('/v/') || /\.(mp4|mkv|mov|webm|avi|m4v|flv|wmv|ts|3gp)($|\?)/i.test(lowerHref) || lowerHref.includes('video');
+        if (isVideo && !/\.(mp4|mkv|mov|webm|avi|m4v|flv|wmv|ts|3gp)$/i.test(name)) {
+          name += '.mp4';
+        }
+
+        const isDirectCdn = /media-files|get\.bunkr|cdn[0-9]*\.bunkr|storage/i.test(absoluteUrl);
+
+        items.push({
+          id: `dom_item_${idx}_${Math.random().toString(36).substr(2, 5)}`,
+          url: absoluteUrl,
+          name: name,
+          type: isVideo ? 'video' : 'image',
+          size: 'Desconhecido',
+          isResolved: isMediaFile || isDirectCdn
+        });
+      }
+    });
+
+    let finalTitle = extractedTitle;
+    if (!finalTitle && items.length > 0) {
+      const firstFileName = items[0].name;
+      let cleanName = firstFileName.replace(/\.[a-zA-Z0-9]{2,4}$/, '')
+                                   .replace(/[-_]\d+$/, '')
+                                   .replace(/\d+$/, '')
+                                   .replace(/[-_]/g, ' ')
+                                   .trim();
+      cleanName = cleanName.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+      if (cleanName && cleanName.length > 3) {
+        finalTitle = `Álbum - ${cleanName}`;
+      }
+    }
+
+    return { title: finalTitle || 'Álbum Importado', items };
+  } catch (err) {
+    console.error('Erro ao processar mídia do documento:', err);
+    return { title: '', items: [] };
+  }
 };
 
 export default function App() {
@@ -239,6 +562,7 @@ export default function App() {
 
   // Input states
   const [inputUrl, setInputUrl] = useState('');
+  const inputUrlValidation = useMemo(() => validateScraperUrl(inputUrl), [inputUrl]);
   const [pastedHtml, setPastedHtml] = useState('');
   const [clipboardStatus, setClipboardStatus] = useState<'idle' | 'success' | 'empty' | 'error'>('idle');
   const [customAlbumTitle, setCustomAlbumTitle] = useState('');
@@ -451,23 +775,114 @@ export default function App() {
         } catch (e) {}
       }
 
-      // Strategy 1: Look for bunkr-style or general file grid items
+      const resolveUrl = (rawSrc: string): string => {
+        let absoluteUrl = rawSrc.trim();
+        if (absoluteUrl.startsWith('//')) {
+          absoluteUrl = 'https:' + absoluteUrl;
+        } else if (absoluteUrl.startsWith('/')) {
+          absoluteUrl = detectedBaseUrl + absoluteUrl;
+        } else if (!absoluteUrl.startsWith('http://') && !absoluteUrl.startsWith('https://')) {
+          absoluteUrl = detectedBaseUrl + '/' + absoluteUrl;
+        }
+        return rewriteBunkrUrl(absoluteUrl);
+      };
+
+      // PRIORITY 1: Direct <video> elements and <source> tags
+      const videoElements = doc.querySelectorAll('video, video source, source[type*="video"]');
+      videoElements.forEach((vid, idx) => {
+        const src = vid.getAttribute('src') || vid.getAttribute('data-src') || vid.getAttribute('data-url');
+        if (!src || src.startsWith('blob:') || src.startsWith('data:')) return;
+
+        const resolvedUrl = resolveUrl(src);
+        if (seenUrls.has(resolvedUrl)) return;
+        seenUrls.add(resolvedUrl);
+
+        let name = doc.querySelector('h1')?.textContent?.trim() ||
+                   doc.querySelector('.filename, .file-name, .title')?.textContent?.trim() ||
+                   '';
+        if (!name && originalUrl) {
+          name = originalUrl.split('/').pop()?.split('?')[0] || '';
+        }
+        if (!name || name.length < 3) {
+          name = `video_${idx + 1}.mp4`;
+        }
+        if (!/\.(mp4|mkv|mov|webm|avi|m4v|flv|wmv|ts|3gp)$/i.test(name)) {
+          name += '.mp4';
+        }
+
+        items.push({
+          id: `webview_vid_${idx}_${Math.random().toString(36).substr(2, 5)}`,
+          url: resolvedUrl,
+          name: name,
+          type: 'video',
+          size: 'Desconhecido',
+          isResolved: true
+        });
+      });
+
+      // PRIORITY 2: OpenGraph / Meta video tags (Check ONLY if no video was found in Priority 1)
+      const hasDirectVideoTag = items.some(i => i.type === 'video');
+      if (!hasDirectVideoTag) {
+        const metaVideoSrc = doc.querySelector('meta[property="og:video"]')?.getAttribute('content') ||
+                             doc.querySelector('meta[property="og:video:url"]')?.getAttribute('content') ||
+                             doc.querySelector('meta[property="og:video:secure_url"]')?.getAttribute('content') ||
+                             doc.querySelector('meta[name="twitter:player:stream"]')?.getAttribute('content');
+
+        if (metaVideoSrc) {
+          const resolvedUrl = resolveUrl(metaVideoSrc);
+          if (!seenUrls.has(resolvedUrl)) {
+            seenUrls.add(resolvedUrl);
+            let name = originalUrl ? (originalUrl.split('/').pop()?.split('?')[0] || 'video.mp4') : 'video.mp4';
+            if (!/\.(mp4|mkv|mov|webm|avi|m4v|flv|wmv|ts|3gp)$/i.test(name)) name += '.mp4';
+            items.push({
+              id: `webview_meta_vid_${Math.random().toString(36).substr(2, 5)}`,
+              url: resolvedUrl,
+              name: name,
+              type: 'video',
+              size: 'Desconhecido',
+              isResolved: true
+            });
+          }
+        }
+      }
+
+      // PRIORITY 3: Script tags & embedded JSON inspection (Check ONLY if Priorities 1 and 2 yielded no videos)
+      const hasAnyVideoSoFar = items.some(i => i.type === 'video');
+      if (!hasAnyVideoSoFar) {
+        const scriptTags = doc.querySelectorAll('script');
+        scriptTags.forEach((script) => {
+          const content = script.textContent || '';
+          if (!content) return;
+
+          const matches = content.match(/https?:\/\/[^\s"'\\]+\.(?:mp4|mkv|mov|webm|m3u8)[^\s"'\\]*/gi);
+          if (matches) {
+            matches.forEach((vUrl, idx) => {
+              const cleanedUrl = resolveUrl(vUrl.replace(/\\/g, ''));
+              if (!seenUrls.has(cleanedUrl)) {
+                seenUrls.add(cleanedUrl);
+                let name = originalUrl ? (originalUrl.split('/').pop()?.split('?')[0] || `video_${idx + 1}.mp4`) : `video_${idx + 1}.mp4`;
+                if (!/\.(mp4|mkv|mov|webm|avi|m4v|flv|wmv|ts|3gp)$/i.test(name)) name += '.mp4';
+                items.push({
+                  id: `webview_script_vid_${idx}_${Math.random().toString(36).substr(2, 5)}`,
+                  url: cleanedUrl,
+                  name: name,
+                  type: 'video',
+                  size: 'Desconhecido',
+                  isResolved: true
+                });
+              }
+            });
+          }
+        });
+      }
+
+      // PRIORITY 3: Anchor <a> tags for album pages or file grid lists
       const links = doc.querySelectorAll('a');
       links.forEach((link, idx) => {
         const href = link.getAttribute('href');
         if (!href || href.startsWith('javascript:') || href.startsWith('#')) return;
 
-        // Clean and resolve href
-        let absoluteUrl = href;
-        if (href.startsWith('//')) {
-          absoluteUrl = 'https:' + href;
-        } else if (href.startsWith('/')) {
-          absoluteUrl = detectedBaseUrl + href;
-        } else if (!href.startsWith('http://') && !href.startsWith('https://')) {
-          absoluteUrl = detectedBaseUrl + '/' + href;
-        }
-
-        absoluteUrl = rewriteBunkrUrl(absoluteUrl);
+        const absoluteUrl = resolveUrl(href);
         const lowerHref = absoluteUrl.toLowerCase();
         
         // Is it a direct media file, or a viewing page?
@@ -512,36 +927,6 @@ export default function App() {
             isResolved: isMediaFile || isDirectCdn
           });
         }
-      });
-
-      // Strategy 2: Direct video tags
-      const videos = doc.querySelectorAll('video source, video');
-      videos.forEach((vid, idx) => {
-        const src = vid.getAttribute('src');
-        if (!src) return;
-
-        let absoluteUrl = src;
-        if (src.startsWith('//')) {
-          absoluteUrl = 'https:' + src;
-        } else if (src.startsWith('/')) {
-          absoluteUrl = detectedBaseUrl + src;
-        } else if (!src.startsWith('http://') && !src.startsWith('https://')) {
-          absoluteUrl = detectedBaseUrl + '/' + src;
-        }
-
-        absoluteUrl = rewriteBunkrUrl(absoluteUrl);
-
-        if (seenUrls.has(absoluteUrl)) return;
-        seenUrls.add(absoluteUrl);
-
-        items.push({
-          id: `webview_vid_${idx}_${Math.random().toString(36).substr(2, 5)}`,
-          url: absoluteUrl,
-          name: `video_${idx + 1}.mp4`,
-          type: 'video',
-          size: 'Desconhecido',
-          isResolved: true
-        });
       });
 
       // Fallback title deriving
@@ -1088,10 +1473,15 @@ export default function App() {
     }
   };
 
-  // Perform server-side scraping of a URL
+  // Perform server-side scraping of a URL with direct DOM scan priority
   const handleUrlScrape = async () => {
-    if (!inputUrl) {
+    if (!inputUrl.trim()) {
       setErrorMessage('Por favor, digite um link de álbum válido.');
+      return;
+    }
+
+    if (!inputUrlValidation.isSupported) {
+      setErrorMessage(inputUrlValidation.message || 'A URL informada não é suportada pelos scrapers do Bunkr/BAlbums.');
       return;
     }
 
@@ -1100,8 +1490,39 @@ export default function App() {
     setMediaItems([]);
 
     try {
-      // Direct call to our backend api
-      const response = await fetch(`/api/scrape?url=${encodeURIComponent(inputUrl)}`);
+      // Step 1: PRIORITIZE DIRECT DOM SCAN OF THE PAGE
+      // Attempt to fetch document HTML via proxy-html and perform client-parsed DOM scan directly
+      try {
+        const proxyRes = await fetch(`/api/proxy-html?url=${encodeURIComponent(inputUrl.trim())}`);
+        if (proxyRes.ok) {
+          const htmlText = await proxyRes.text();
+          if (htmlText) {
+            const { title, items } = parseDocumentMedia(htmlText, inputUrl.trim());
+            const hasDirectVideo = items.some(i => i.isResolved && i.type === 'video');
+            const hasResolvedItems = items.some(i => i.isResolved);
+
+            // If direct DOM scan extracted a primary video source URL or resolved media items
+            if (hasDirectVideo || (items.length > 0 && hasResolvedItems)) {
+              console.log('[handleUrlScrape] Sucesso no escaneamento direto do DOM. Mídias extraídas:', items);
+              setAlbumTitle(title || 'Álbum Importado');
+              setAlbumSourceUrl(inputUrl.trim());
+              const processedItems = applyExtractionRules(items, extractionSettings);
+              setMediaItems(processedItems);
+              setViewMode('viewer');
+              if (extractionSettings.autoSelectImported) {
+                setSelectedIds(new Set(processedItems.map(i => i.id)));
+              }
+              setIsLoading(false);
+              return;
+            }
+          }
+        }
+      } catch (domErr) {
+        console.warn('[handleUrlScrape] Escaneamento direto via DOM contornado, tentando servidor de raspagem:', domErr);
+      }
+
+      // Step 2: FALLBACK TO SCRAPER ENDPOINT IF DIRECT DOM SCAN DID NOT EXTRACT DIRECT MEDIA
+      const response = await fetch(`/api/scrape?url=${encodeURIComponent(inputUrl.trim())}`);
       
       let data: any;
       const contentType = response.headers.get('content-type');
@@ -2451,31 +2872,109 @@ export default function App() {
                     ))}
                   </div>
 
-                  <div className="space-y-1 mt-1">
-                    <label className="text-[10px] uppercase tracking-wider font-extrabold text-slate-500">URL do Álbum</label>
+                  <div className="space-y-2 mt-1">
+                    <div className="flex items-center justify-between">
+                      <label className="text-[10px] uppercase tracking-wider font-extrabold text-slate-500">URL do Álbum</label>
+                      {inputUrlValidation.status !== 'empty' && (
+                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1 transition-all ${
+                          inputUrlValidation.isSupported
+                            ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
+                            : inputUrlValidation.status === 'invalid_url'
+                            ? 'bg-red-500/15 text-red-400 border border-red-500/30'
+                            : 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
+                        }`}>
+                          {inputUrlValidation.isSupported ? (
+                            <>
+                              <CheckCircle2 className="h-3 w-3 text-emerald-400" />
+                              <span>Suportado ({inputUrlValidation.type === 'album' ? 'Álbum' : inputUrlValidation.type === 'item' ? 'Vídeo/Item' : 'Mídia'})</span>
+                            </>
+                          ) : inputUrlValidation.status === 'invalid_url' ? (
+                            <>
+                              <AlertTriangle className="h-3 w-3 text-red-400" />
+                              <span>URL Inválida</span>
+                            </>
+                          ) : (
+                            <>
+                              <ShieldAlert className="h-3 w-3 text-amber-400" />
+                              <span>Domínio Não Suportado</span>
+                            </>
+                          )}
+                        </span>
+                      )}
+                    </div>
+
                     <div className="relative">
                       <input
                         type="url"
                         value={inputUrl}
                         onChange={(e) => setInputUrl(e.target.value)}
                         placeholder="https://bunkr.cr/a/... ou bunkr.is / balbums.st"
-                        className="w-full bg-slate-950 border border-slate-850 rounded-2xl py-3 pl-4 pr-10 text-xs text-slate-100 placeholder:text-slate-600 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition duration-150"
+                        className={`w-full bg-slate-950 border rounded-2xl py-3 pl-4 pr-10 text-xs text-slate-100 placeholder:text-slate-600 focus:outline-none transition duration-150 ${
+                          inputUrlValidation.status === 'empty'
+                            ? 'border-slate-850 focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500'
+                            : inputUrlValidation.isSupported
+                            ? 'border-emerald-500/50 focus:ring-1 focus:ring-emerald-500 focus:border-emerald-500'
+                            : inputUrlValidation.status === 'invalid_url'
+                            ? 'border-red-500/50 focus:ring-1 focus:ring-red-500 focus:border-red-500'
+                            : 'border-amber-500/50 focus:ring-1 focus:ring-amber-500 focus:border-amber-500'
+                        }`}
                       />
                       <button
                         onClick={handleUrlScrape}
-                        disabled={isLoading}
-                        className="absolute right-2 top-2 p-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-indigo-400 transition"
+                        disabled={isLoading || (inputUrl.trim().length > 0 && !inputUrlValidation.isSupported)}
+                        className="absolute right-2 top-2 p-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-indigo-400 transition disabled:opacity-40 cursor-pointer"
+                        title={inputUrlValidation.isSupported ? "Processar URL" : "Insira uma URL de Bunkr/BAlbums válida"}
                       >
                         {isLoading ? <RefreshCw className="h-4 w-4 animate-spin text-slate-500" /> : <Search className="h-4 w-4" />}
                       </button>
                     </div>
+
+                    {/* Real-time validation feedback card */}
+                    {inputUrl.trim().length > 0 && (
+                      <div className={`p-3 rounded-2xl text-[11px] flex items-start gap-2.5 transition-all ${
+                        inputUrlValidation.isSupported
+                          ? 'bg-emerald-950/30 border border-emerald-500/20 text-emerald-300'
+                          : inputUrlValidation.status === 'invalid_url'
+                          ? 'bg-red-950/30 border border-red-500/20 text-red-300'
+                          : 'bg-amber-950/30 border border-amber-500/20 text-amber-300'
+                      }`}>
+                        {inputUrlValidation.isSupported ? (
+                          <ShieldCheck className="h-4 w-4 text-emerald-400 shrink-0 mt-0.5" />
+                        ) : inputUrlValidation.status === 'invalid_url' ? (
+                          <AlertTriangle className="h-4 w-4 text-red-400 shrink-0 mt-0.5" />
+                        ) : (
+                          <ShieldAlert className="h-4 w-4 text-amber-400 shrink-0 mt-0.5" />
+                        )}
+                        <div className="leading-relaxed">
+                          <strong className="block text-[11px] font-bold mb-0.5">
+                            {inputUrlValidation.isSupported 
+                              ? 'Link Compatível com Scrapers Automáticos' 
+                              : inputUrlValidation.status === 'invalid_url'
+                              ? 'Endereço de URL Inválido'
+                              : 'Domínio Não Reconhecido'}
+                          </strong>
+                          <p className="text-[10px] opacity-90">
+                            {inputUrlValidation.message}
+                          </p>
+                          {!inputUrlValidation.isSupported && inputUrlValidation.status !== 'invalid_url' && (
+                            <p className="text-[10px] text-slate-400 mt-1 border-t border-amber-500/20 pt-1">
+                              💡 <strong>Solução:</strong> Se deseja extrair mídias deste site, abra a página no seu navegador e utilize a aba <button type="button" onClick={() => setActiveTab('html')} className="text-amber-300 underline font-semibold hover:text-amber-200">Colar Código (HTML)</button> ou o <button type="button" onClick={() => setActiveTab('webview')} className="text-amber-300 underline font-semibold hover:text-amber-200">Navegador Webview</button>.
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   <button
                     onClick={handleUrlScrape}
-                    disabled={isLoading}
+                    disabled={isLoading || !inputUrl.trim() || !inputUrlValidation.isSupported}
                     id="btn-scrape"
-                    className="w-full bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 active:scale-[0.98] text-white text-xs font-bold py-3.5 px-4 rounded-2xl shadow-lg shadow-indigo-500/10 flex items-center justify-center gap-2 transition duration-150 disabled:opacity-50 disabled:pointer-events-none"
+                    className={`w-full text-white text-xs font-bold py-3.5 px-4 rounded-2xl shadow-lg flex items-center justify-center gap-2 transition duration-150 ${
+                      inputUrlValidation.isSupported
+                        ? 'bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 active:scale-[0.98] shadow-indigo-500/10 cursor-pointer'
+                        : 'bg-slate-800 text-slate-500 border border-slate-750 cursor-not-allowed opacity-60'
+                    }`}
                   >
                     {isLoading ? (
                       <>
@@ -2485,7 +2984,7 @@ export default function App() {
                     ) : (
                       <>
                         <Search className="h-4 w-4" />
-                        Importar do Link
+                        {inputUrlValidation.isSupported ? 'Importar do Link' : 'Link Não Suportado pelo Scraper'}
                       </>
                     )}
                   </button>

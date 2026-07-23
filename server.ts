@@ -494,7 +494,7 @@ Para cada álbum, você deve gerar:
     res.json(customizedFallback);
   });
 
-  // Helper to rewrite old or dead Bunkr domains to active working domains (bunkr.cr / media-files.bunkr.cr)
+  // Helper to rewrite old or dead Bunkr domains to active working domains (bunkr.cr / media-files.bunkr.is)
   const rewriteBunkrUrl = (urlStr: string): string => {
     if (!urlStr) return '';
     const trimmed = urlStr.trim();
@@ -505,25 +505,23 @@ Para cada álbum, você deve gerar:
       const urlObj = new URL(trimmed);
       const hostname = urlObj.hostname.toLowerCase();
       
-      // Handle media-files (e.g. media-files.bunkr.is, media-files.bunkr.ru, media-files.cr, etc.)
+      // Handle media-files (e.g. media-files.bunkr.is, media-files.bunkr.site, media-files.bunkr.ws)
       if (hostname.includes('media-files')) {
-        urlObj.hostname = 'media-files.bunkr.cr';
+        if (hostname.endsWith('.cr') || hostname === 'media-files.bunkr.cr') {
+          urlObj.hostname = 'media-files.bunkr.is';
+        }
         return urlObj.toString();
       }
 
-      // Handle any Bunkr or Bunkrr domain variant (.cr, .is, .ru, .si, .la, .ph, .site, .ws, .red, .black, .art, .sk, .pk, .ca, .ax, .fi, .to, .ac, .se, .ci, .cat, .d, .pm, .app, .click, .one, .media, .st, .club, .asia, .org, .net, .io, etc.)
+      // Handle any Bunkr or Bunkrr domain variant
       if (hostname.includes('bunkr') || hostname.includes('bunkrr')) {
         if (hostname.startsWith('get.')) {
-          urlObj.hostname = 'get.bunkr.cr';
+          urlObj.hostname = 'get.bunkr.is';
         } else if (hostname.startsWith('cdn')) {
           const cdnMatch = hostname.match(/^(cdn\d*)\./i);
-          if (cdnMatch) {
-            urlObj.hostname = `${cdnMatch[1]}.bunkr.cr`;
-          } else {
-            urlObj.hostname = 'cdn.bunkr.cr';
-          }
+          urlObj.hostname = cdnMatch ? `${cdnMatch[1]}.bunkr.is` : 'cdn.bunkr.is';
         } else if (hostname.startsWith('storage.')) {
-          urlObj.hostname = 'storage.bunkr.cr';
+          urlObj.hostname = 'storage.bunkr.is';
         } else {
           urlObj.hostname = 'bunkr.cr';
         }
@@ -698,100 +696,6 @@ Para cada álbum, você deve gerar:
     throw new Error('Todos os métodos de requisição falharam.');
   };
 
-  // Helper to identify video URLs
-  function isVideoUrl(url: string): boolean {
-    const videoExtensions = /\.(mp4|mkv|mov|webm|avi|m4v|flv|wmv|ts|m3u8|m3u|mpg|mpeg|3gp)($|\?)/i;
-    return videoExtensions.test(url) || url.includes('/v/') || url.includes('video') || url.includes('stream') || url.includes('get.bunkr');
-  }
-
-  // Helper to extract file name from URL or fallback
-  function extractFileNameFromUrl(url: string): string {
-    try {
-      const parsed = new URL(url);
-      const pathname = parsed.pathname;
-      const parts = pathname.split('/');
-      const last = parts[parts.length - 1];
-      if (last && last.includes('.')) {
-        return decodeURIComponent(last);
-      }
-      if (isVideoUrl(url)) {
-        return last ? `${decodeURIComponent(last)}.mp4` : 'video.mp4';
-      }
-      return last || 'file';
-    } catch {
-      return 'file';
-    }
-  }
-
-  // Helper to extract video items from HTML tags (<video>, <source>, data-* attributes, view pages)
-  function extractAllVideosFromHtml(html: string, baseUrl: string): any[] {
-    const videos: any[] = [];
-    const seen = new Set<string>();
-
-    // 1. Tags <video> and <source>
-    const videoRegex = /<(?:video|source)[^>]+(?:src|data-src|data-video|data-mp4)=["']([^"']+)["']/gi;
-    let match;
-    while ((match = videoRegex.exec(html)) !== null) {
-      let url = match[1];
-      if (url.startsWith('//')) url = 'https:' + url;
-      else if (url.startsWith('/')) url = baseUrl + url;
-      url = rewriteBunkrUrl(url);
-      if (!seen.has(url) && isVideoUrl(url)) {
-        seen.add(url);
-        const name = extractFileNameFromUrl(url) || `video_${videos.length + 1}.mp4`;
-        videos.push({
-          url,
-          name,
-          type: 'video',
-          size: 'Desconhecido',
-          isResolved: true,
-        });
-      }
-    }
-
-    // 2. Data attributes with video extensions
-    const dataAttrRegex = /(?:data-file|data-href|data-url|data-video|data-mp4)=["']([^"']+\.(?:mp4|mkv|mov|webm|avi|m4v|flv|wmv|ts|m3u8)[^"']*)["']/gi;
-    while ((match = dataAttrRegex.exec(html)) !== null) {
-      let url = match[1];
-      if (url.startsWith('//')) url = 'https:' + url;
-      else if (url.startsWith('/')) url = baseUrl + url;
-      url = rewriteBunkrUrl(url);
-      if (!seen.has(url) && isVideoUrl(url)) {
-        seen.add(url);
-        const name = extractFileNameFromUrl(url) || `video_${videos.length + 1}.mp4`;
-        videos.push({
-          url,
-          name,
-          type: 'video',
-          size: 'Desconhecido',
-          isResolved: true,
-        });
-      }
-    }
-
-    // 3. Links to /v/ or /d/ view pages
-    const viewRegex = /<a[^>]+href=["']([^"']*\/[vd]\/([a-zA-Z0-9_\-\.]+)[^"']*)["']/gi;
-    while ((match = viewRegex.exec(html)) !== null) {
-      let url = match[1];
-      if (url.startsWith('//')) url = 'https:' + url;
-      else if (url.startsWith('/')) url = baseUrl + url;
-      url = rewriteBunkrUrl(url);
-      const slug = match[2];
-      if (!seen.has(url)) {
-        seen.add(url);
-        videos.push({
-          url,
-          name: `${slug}.mp4`,
-          type: 'video',
-          size: 'Desconhecido',
-          isResolved: false,
-        });
-      }
-    }
-
-    return videos;
-  }
-
   // Helper to parse Next.js __NEXT_DATA__ or embedded JSON in Bunkr/BAlbums pages
   function extractFilesFromNextDataOrJson(html: string, pageUrl: string): any[] {
     const items: any[] = [];
@@ -912,203 +816,215 @@ Para cada álbum, você deve gerar:
   app.get('/api/scrape', async (req, res) => {
     const targetUrl = req.query.url as string;
     if (!targetUrl) {
-       res.status(400).json({ error: 'Parâmetro URL é obrigatório.' });
-       return;
+      res.status(400).json({ error: 'Parâmetro URL é obrigatório.' });
+      return;
     }
 
     try {
-      console.log(`[Scrape] Tentando raspar URL: ${targetUrl}`);
-      const { html } = await fetchPage(targetUrl);
-
-      const items: any[] = [];
-      const seen = new Set<string>();
-
+      console.log(`[Scrape] Processando URL: ${targetUrl}`);
       const urlObj = new URL(targetUrl);
       const baseUrl = `${urlObj.protocol}//${urlObj.hostname}`;
 
-      // Check if target URL itself is a single Bunkr view page (/v/, /d/, /f/) or direct media
-      const isSingleViewPage = /\/(v|i|d|f|file|view|watch|download)\/[^\s"'<>#]+/i.test(targetUrl);
-      if (isSingleViewPage) {
-        // Tentar extrair file_id e obter URL assinada primeiro
-        const fileId = extractFileIdFromItemPage(html);
-        let signedUrl: string | null = null;
-        if (fileId) {
-          signedUrl = await getSignedUrl(fileId);
+      // Helper function to extract media URLs directly from HTML without API dependency
+      function extractMediaUrlsFromHtml(html: string, base: string): { url: string; type: string; name: string }[] {
+        const results: { url: string; type: string; name: string }[] = [];
+        const seen = new Set<string>();
+
+        // 1. Tags <video> e <source>
+        const videoRegex = /<(?:video|source)[^>]+(?:src|data-src|data-url)=["']([^"']+)["']/gi;
+        let match;
+        while ((match = videoRegex.exec(html)) !== null) {
+          let url = match[1];
+          if (url.startsWith('//')) url = 'https:' + url;
+          else if (url.startsWith('/')) url = base + url;
+          url = rewriteBunkrUrl(url);
+          if (!seen.has(url) && (url.includes('.mp4') || url.includes('.m3u8') || url.includes('/v/') || /\.(mkv|mov|webm|avi|m4v|flv|wmv|ts)($|\?)/i.test(url))) {
+            seen.add(url);
+            const name = url.split('?')[0].split('/').pop() || 'video.mp4';
+            results.push({ url, type: 'video', name });
+          }
         }
 
-        const directMediaUrl = signedUrl || extractDirectMediaUrlFromHtml(html, targetUrl);
-        if (directMediaUrl) {
-          const lower = directMediaUrl.toLowerCase();
-          const isVideo = /\.(mp4|mkv|mov|webm|avi|m4v|flv|wmv|ts|3gp)($|\?)/i.test(lower) || targetUrl.toLowerCase().includes('/v/');
-          
-          let name = 'video_file.mp4';
-          try {
-            const urlParts = directMediaUrl.split('?')[0].split('/');
-            const lastPart = urlParts[urlParts.length - 1];
-            if (lastPart && lastPart.includes('.')) {
-              name = decodeURIComponent(lastPart);
-            } else {
-              name = isVideo ? `video_${urlObj.pathname.split('/').pop()}.mp4` : `imagem_${urlObj.pathname.split('/').pop()}.jpg`;
-            }
-          } catch (e) {}
+        // 2. OpenGraph/Twitter Meta Tags
+        const ogVideoRegex = /<meta[^>]+(?:property|name)=["'](?:og:video|og:video:url|og:video:secure_url|twitter:player:stream)["'][^>]+content=["']([^"']+)["']/gi;
+        while ((match = ogVideoRegex.exec(html)) !== null) {
+          let url = match[1];
+          if (url.startsWith('//')) url = 'https:' + url;
+          else if (url.startsWith('/')) url = base + url;
+          url = rewriteBunkrUrl(url);
+          if (!seen.has(url)) {
+            seen.add(url);
+            const name = url.split('?')[0].split('/').pop() || 'video.mp4';
+            results.push({ url, type: 'video', name });
+          }
+        }
 
-          const titleMatch = html.match(/<title>([^<]+)<\/title>/i) || html.match(/<h1[^>]*>([^<]+)<\/h1>/i);
-          const title = titleMatch ? titleMatch[1].replace(' - Bunkr', '').replace(' - BAlbums', '').trim() : name;
+        // 3. Imagens (excluindo thumbnails e ícones)
+        const imgRegex = /<img[^>]+(?:src|data-src)=["']([^"']+\.(?:jpg|jpeg|png|webp|gif))["']/gi;
+        while ((match = imgRegex.exec(html)) !== null) {
+          let url = match[1];
+          if (url.startsWith('//')) url = 'https:' + url;
+          else if (url.startsWith('/')) url = base + url;
+          url = rewriteBunkrUrl(url);
+          if (url.includes('/thumbs/') || url.includes('bunkr.svg') || url.includes('favicon')) continue;
+          if (!seen.has(url)) {
+            seen.add(url);
+            const name = url.split('?')[0].split('/').pop() || 'imagem.jpg';
+            results.push({ url, type: 'image', name });
+          }
+        }
 
-          items.push({
-            url: directMediaUrl,
-            name: name,
-            type: isVideo ? 'video' : 'image',
-            size: 'Desconhecido',
-            isResolved: true
-          });
+        // 4. Links para páginas de visualização de item (/v/, /d/, /f/, /i/)
+        const viewRegex = /<a[^>]+href=["']([^"']*\/(?:v|d|f|i|file|view|watch|download)\/[a-zA-Z0-9_\-\.]+)["']/gi;
+        while ((match = viewRegex.exec(html)) !== null) {
+          let url = match[1];
+          if (url.startsWith('/')) url = base + url;
+          else if (url.startsWith('//')) url = 'https:' + url;
+          url = rewriteBunkrUrl(url);
+          if (!seen.has(url)) {
+            seen.add(url);
+            const slug = url.split('?')[0].split('/').pop() || 'item';
+            results.push({ url, type: 'unknown', name: slug });
+          }
+        }
 
-          res.json({
-            title,
+        // 5. Qualquer URL direta de mídia no texto/scripts/atributos (ex: CDN)
+        const mediaRegex = /https?:\/\/[^\s"'<>]+\.(?:mp4|mkv|mov|webm|avi|m4v|jpg|jpeg|png|webp|gif)[^\s"'<>]*/gi;
+        while ((match = mediaRegex.exec(html)) !== null) {
+          let url = match[0];
+          url = rewriteBunkrUrl(url);
+          if (!seen.has(url) && !url.includes('/thumbs/')) {
+            seen.add(url);
+            const ext = url.split('?')[0].split('.').pop()?.toLowerCase() || '';
+            const isVid = ['mp4','mkv','mov','webm','avi','m4v'].includes(ext);
+            const name = url.split('?')[0].split('/').pop() || (isVid ? 'video.mp4' : 'imagem.jpg');
+            results.push({ url, type: isVid ? 'video' : 'image', name });
+          }
+        }
+
+        return results;
+      }
+
+      // Função para resolver páginas de item individuais (/v/, /d/, /f/) sem depender do endpoint /api/download da API
+      async function resolveViewUrl(viewUrl: string): Promise<{ url: string; type: string; name: string } | null> {
+        try {
+          const { html } = await fetchPage(viewUrl);
+          const origin = new URL(viewUrl).origin;
+
+          // Extrair mídias diretas da página do item
+          const items = extractMediaUrlsFromHtml(html, origin);
+          const directMedia = items.find(item => !item.url.includes('/thumbs/') && item.type !== 'unknown');
+          if (directMedia) return directMedia;
+
+          // Fallback via script JSON ou regex de media-files
+          const scriptMatch = html.match(/["'](https?:\/\/[^"']*(?:media-files|get\.bunkr|cdn[0-9]*\.bunkr|storage)[^"']*\.(?:mp4|mkv|mov|webm|avi|jpg|jpeg|png|webp)[^"']*)["']/i) ||
+                              html.match(/["'](https?:\/\/[^"']+\.(?:mp4|mkv|mov|webm|avi)[^"']*)["']/i);
+          if (scriptMatch) {
+            let u = scriptMatch[1];
+            u = rewriteBunkrUrl(u);
+            const isVid = /\.(mp4|mkv|mov|webm|avi)/i.test(u) || viewUrl.includes('/v/');
+            return {
+              url: u,
+              type: isVid ? 'video' : 'image',
+              name: u.split('?')[0].split('/').pop() || (isVid ? 'video.mp4' : 'imagem.jpg')
+            };
+          }
+
+          // Fallback por slug direto no CDN
+          const slugMatch = viewUrl.match(/\/(?:v|i|d|f)\/([a-zA-Z0-9_\-\.]+)/i);
+          if (slugMatch && slugMatch[1]) {
+            const slug = slugMatch[1];
+            const isVid = viewUrl.includes('/v/');
+            const cdnUrl = rewriteBunkrUrl(`https://media-files.bunkr.cr/${slug}.${isVid ? 'mp4' : 'jpg'}`);
+            return {
+              url: cdnUrl,
+              type: isVid ? 'video' : 'image',
+              name: `${slug}.${isVid ? 'mp4' : 'jpg'}`
+            };
+          }
+
+          return null;
+        } catch (err) {
+          console.error(`[Scrape] Erro ao resolver página do item ${viewUrl}:`, err);
+          const slugMatch = viewUrl.match(/\/(?:v|i|d|f)\/([a-zA-Z0-9_\-\.]+)/i);
+          if (slugMatch && slugMatch[1]) {
+            const slug = slugMatch[1];
+            const isVid = viewUrl.includes('/v/');
+            return {
+              url: rewriteBunkrUrl(`https://media-files.bunkr.cr/${slug}.${isVid ? 'mp4' : 'jpg'}`),
+              type: isVid ? 'video' : 'image',
+              name: `${slug}.${isVid ? 'mp4' : 'jpg'}`
+            };
+          }
+          return null;
+        }
+      }
+
+      // --- Início da raspagem ---
+      const { html: albumHtml } = await fetchPage(targetUrl);
+      const allItems = extractMediaUrlsFromHtml(albumHtml, baseUrl);
+
+      // Separar itens já resolvidos (links diretos) das páginas de visualização de item (/v/, /d/, etc)
+      const directItems = allItems.filter(item => item.type !== 'unknown' && !item.url.includes('/v/') && !item.url.includes('/d/'));
+      const viewItems = allItems.filter(item => item.type === 'unknown' || item.url.includes('/v/') || item.url.includes('/d/'));
+
+      console.log(`[Scrape] Mídias diretas: ${directItems.length}, Páginas de item a resolver: ${viewItems.length}`);
+
+      // Resolver páginas de item em lotes (batch de 3 com pequenas pausas)
+      const resolvedItems: { url: string; type: string; name: string }[] = [];
+      const batchSize = 3;
+      for (let i = 0; i < viewItems.length; i += batchSize) {
+        const batch = viewItems.slice(i, i + batchSize);
+        const results = await Promise.all(batch.map(item => resolveViewUrl(item.url)));
+        for (const r of results) {
+          if (r) resolvedItems.push(r);
+        }
+        if (i + batchSize < viewItems.length) {
+          await new Promise(r => setTimeout(r, 400));
+        }
+      }
+
+      const finalItems = [...directItems, ...resolvedItems];
+
+      // Remover duplicatas por URL
+      const seenUrls = new Set<string>();
+      const uniqueItems = finalItems.filter(item => {
+        if (seenUrls.has(item.url)) return false;
+        seenUrls.add(item.url);
+        return true;
+      });
+
+      // Se nenhum arquivo foi encontrado pela raspagem DOM, usar fallback Next.js JSON
+      if (uniqueItems.length === 0) {
+        const fallback = extractFilesFromNextDataOrJson(albumHtml, targetUrl);
+        if (fallback.length > 0) {
+          return res.json({
+            title: 'Álbum (Fallback)',
             sourceUrl: targetUrl,
-            itemsCount: items.length,
-            items
-          });
-          return;
-        }
-      }
-
-      // 1. Try Next.js __NEXT_DATA__ extraction first
-      const nextDataItems = extractFilesFromNextDataOrJson(html, targetUrl);
-      for (const item of nextDataItems) {
-        if (!seen.has(item.url)) {
-          seen.add(item.url);
-          items.push(item);
-        }
-      }
-
-      // 1.5 Extract videos directly from HTML tags and video data attributes
-      const videoItems = extractAllVideosFromHtml(html, baseUrl);
-      for (const video of videoItems) {
-        if (!seen.has(video.url)) {
-          seen.add(video.url);
-          items.push(video);
-        }
-      }
-
-      // 2. Collect all potential URLs from unescaped HTML
-      const unescapedHtml = html.replace(/\\\/|\\u002F/gi, '/');
-      const rawUrls: string[] = [];
-
-      // Standard HTML attributes
-      const attrRegex = /(?:href|src|data-src|data-url|data-href|data-download|data-file|data-link|data-target)=["']([^"']+)["']/gi;
-      let match;
-      while ((match = attrRegex.exec(unescapedHtml)) !== null) {
-        rawUrls.push(match[1]);
-      }
-
-      // Direct absolute URLs embedded anywhere in page or JS
-      const absUrlRegex = /https?:\/\/[^\s"'<>\\]+\.(?:mp4|mkv|mov|webm|avi|m4v|flv|wmv|ts|3gp|jpg|jpeg|png|webp|gif)/gi;
-      while ((match = absUrlRegex.exec(unescapedHtml)) !== null) {
-        rawUrls.push(match[0]);
-      }
-
-      // View page paths embedded anywhere in HTML/JS
-      const viewPathRegex = /\/(?:v|i|d|f|file|view|watch|download)\/[a-zA-Z0-9_\-\.]+/gi;
-      while ((match = viewPathRegex.exec(unescapedHtml)) !== null) {
-        rawUrls.push(match[0]);
-      }
-
-      for (const rawUrl of rawUrls) {
-        if (!rawUrl || rawUrl.startsWith('javascript:') || rawUrl.startsWith('#') || rawUrl.includes('twitter.com') || rawUrl.includes('discord') || rawUrl.includes('telegram')) continue;
-
-        let absoluteUrl = rawUrl;
-        if (rawUrl.startsWith('//')) {
-          absoluteUrl = urlObj.protocol + rawUrl;
-        } else if (rawUrl.startsWith('/')) {
-          absoluteUrl = baseUrl + rawUrl;
-        } else if (!rawUrl.startsWith('http://') && !rawUrl.startsWith('https://')) {
-          const cleanPath = urlObj.pathname.endsWith('/') ? urlObj.pathname : urlObj.pathname.substring(0, urlObj.pathname.lastIndexOf('/') + 1);
-          absoluteUrl = baseUrl + cleanPath + rawUrl;
-        }
-
-        absoluteUrl = rewriteBunkrUrl(absoluteUrl);
-        if (seen.has(absoluteUrl)) continue;
-        seen.add(absoluteUrl);
-
-        const lowerUrl = absoluteUrl.toLowerCase();
-        
-        // Check if it's a direct media file or a Bunkr/BAlbums view page
-        const isMediaFile = /\.(mp4|mkv|mov|webm|avi|m4v|flv|wmv|ts|3gp|jpg|jpeg|png|webp|gif|mp3|wav|ogg)($|\?)/i.test(lowerUrl);
-        const isViewPage = /\/(v|i|d|f|file|view|watch|download)\/[a-zA-Z0-9_\-\.]+/i.test(lowerUrl);
-
-        if (isMediaFile || isViewPage) {
-          const isVideo = /\.(mp4|mkv|mov|webm|avi|m4v|flv|wmv|ts|3gp)($|\?)/i.test(lowerUrl) || lowerUrl.includes('/v/');
-          const isImage = /\.(jpg|jpeg|png|webp|gif)($|\?)/i.test(lowerUrl) || lowerUrl.includes('/i/');
-
-          let name = '';
-          try {
-            const urlParts = absoluteUrl.split('?')[0].split('/');
-            const lastPart = urlParts[urlParts.length - 1];
-            if (lastPart && lastPart.includes('.')) {
-              name = decodeURIComponent(lastPart);
-            } else {
-              const slug = lastPart || 'file';
-              name = isVideo ? `video_${slug}.mp4` : (isImage ? `imagem_${slug}.jpg` : `arquivo_${slug}`);
-            }
-          } catch (e) {}
-
-          if (!name) {
-            name = isVideo ? 'video_file.mp4' : 'midia_file';
-          }
-
-          if (isVideo && !/\.(mp4|mkv|mov|webm|avi|m4v|flv|wmv|ts|3gp)$/i.test(name)) {
-            name += '.mp4';
-          }
-
-          const isDirectCdn = /media-files|get\.bunkr|cdn[0-9]*\.bunkr|storage/i.test(absoluteUrl);
-
-          items.push({
-            url: absoluteUrl,
-            name: name,
-            type: isVideo ? 'video' : (isImage ? 'image' : 'other'),
-            size: 'Desconhecido',
-            isResolved: isMediaFile || isDirectCdn,
+            itemsCount: fallback.length,
+            items: fallback.map(f => ({ ...f, isResolved: true }))
           });
         }
       }
 
-      // Tentar resolver links não resolvidos usando a API de assinatura do Bunkr em lote (batch de 5)
-      const unresolvedItems = items.filter(i => !i.isResolved && /\/(v|i|d|f|file|view|watch|download)\//i.test(i.url));
-      if (unresolvedItems.length > 0) {
-        console.log(`[Scrape] Tentando resolver ${unresolvedItems.length} itens não resolvidos via API /api/download...`);
-        const batchSize = 5;
-        for (let i = 0; i < unresolvedItems.length; i += batchSize) {
-          const batch = unresolvedItems.slice(i, i + batchSize);
-          await Promise.all(
-            batch.map(async (item) => {
-              try {
-                const { html: itemHtml } = await fetchPage(item.url);
-                const fileId = extractFileIdFromItemPage(itemHtml);
-                if (fileId) {
-                  const signedUrl = await getSignedUrl(fileId);
-                  if (signedUrl) {
-                    item.url = signedUrl;
-                    item.isResolved = true;
-                  }
-                }
-              } catch (err) {
-                // Manter URL original se falhar
-              }
-            })
-          );
-        }
-      }
+      // Extrair título do álbum
+      const titleMatch = albumHtml.match(/<title>([^<]+)<\/title>/i) || albumHtml.match(/<h1[^>]*>([^<]+)<\/h1>/i);
+      const title = titleMatch ? titleMatch[1].replace(' - Bunkr', '').replace(' - BAlbums', '').trim() : 'Álbum Importado';
 
-      // Check if title can be extracted
-      const titleMatch = html.match(/<title>([^<]+)<\/title>/i) || html.match(/<h1[^>]*>([^<]+)<\/h1>/i);
-      const title = titleMatch ? titleMatch[1].replace(' - Bunkr', '').replace(' - BAlbums', '').trim() : 'Álbum Desconhecido';
+      const mediaItems = uniqueItems.map(item => ({
+        id: `item_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+        url: item.url,
+        name: item.name,
+        type: item.type === 'video' ? 'video' : 'image',
+        size: 'Desconhecido',
+        isResolved: true
+      }));
 
       res.json({
         title,
         sourceUrl: targetUrl,
-        itemsCount: items.length,
-        items,
+        itemsCount: mediaItems.length,
+        items: mediaItems
       });
 
     } catch (error: any) {
@@ -1127,6 +1043,7 @@ Para cada álbum, você deve gerar:
             sourceUrl: targetUrl,
             itemsCount: 1,
             items: [{
+              id: `item_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
               url: directCdnUrl,
               name: isVideo ? `${slug}.mp4` : `${slug}.jpg`,
               type: isVideo ? 'video' : 'image',
@@ -1137,7 +1054,6 @@ Para cada álbum, você deve gerar:
           return;
         }
 
-        // Check if matching slug in DEFAULT_ALBUMS
         const matchedAlbum = DEFAULT_ALBUMS.find(a => targetUrl.toLowerCase().includes(a.id) || a.url.toLowerCase().includes(targetUrl.toLowerCase()));
         if (matchedAlbum) {
           res.json({
@@ -1145,6 +1061,7 @@ Para cada álbum, você deve gerar:
             sourceUrl: targetUrl,
             itemsCount: matchedAlbum.files.length,
             items: matchedAlbum.files.map(f => ({
+              id: `item_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
               url: f.url,
               name: f.name,
               type: f.type,
@@ -1162,58 +1079,6 @@ Para cada álbum, você deve gerar:
       });
     }
   });
-
-  // Extrai o file_id do script data-file-id ou de variáveis JS
-  function extractFileIdFromItemPage(html: string): string | null {
-    // Procura por <script data-file-id="..."> ou data-file-id="..."
-    const match = html.match(/(?:data-file-id|data-id)=["']([^"']+)["']/i);
-    if (match && match[1]) return match[1];
-
-    // Fallback: procura "fileId": "..." ou "id": "..." no JSON interno do Next.js / React
-    const jsonMatch = html.match(/"fileId"\s*:\s*"([^"]+)"/i) || html.match(/"file_id"\s*:\s*"([^"]+)"/i);
-    if (jsonMatch && jsonMatch[1]) return jsonMatch[1];
-
-    return null;
-  }
-
-  // Obtém a URL assinada do Bunkr via API /api/download
-  async function getSignedUrl(fileId: string): Promise<string | null> {
-    if (!fileId) return null;
-    try {
-      console.log(`[Signed URL] Solicitando token assinado para file_id: ${fileId}`);
-      const response = await fetch('https://bunkr.cr/api/download', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-          'Referer': 'https://bunkr.cr/',
-          'Accept': 'application/json, text/plain, */*',
-        },
-        body: JSON.stringify({ id: fileId }),
-      });
-
-      if (!response.ok) {
-        console.warn(`[Signed URL] Resposta da API não-ok (${response.status}) para id ${fileId}`);
-        return null;
-      }
-
-      const data = await response.json();
-      const baseUrl = data.mediafiles || data.url || data.downloadUrl || data.link;
-      const path = data.path || '';
-
-      if (baseUrl && path) {
-        const full = baseUrl.endsWith('/') || path.startsWith('/') ? `${baseUrl}${path}` : `${baseUrl}/${path}`;
-        return rewriteBunkrUrl(full);
-      }
-      if (baseUrl) {
-        return rewriteBunkrUrl(baseUrl);
-      }
-      return null;
-    } catch (error) {
-      console.error('[Signed URL] Erro ao chamar /api/download:', error);
-      return null;
-    }
-  }
 
   // Helper to extract direct media link from view page HTML
   function extractDirectMediaUrlFromHtml(html: string, pageUrl: string): string | null {
@@ -1239,7 +1104,19 @@ Para cada álbum, você deve gerar:
         return rewriteBunkrUrl(u);
       }
 
-      // 3. Look for download link or media CDN link in attributes or JS
+      // 3. Look for OpenGraph video or image meta tags
+      const ogMatch = 
+        unescapedHtml.match(/<meta[^>]+(?:property|name)=["']og:video(?::url|:secure_url)?["'][^>]+content=["']([^"']+)["']/i) ||
+        unescapedHtml.match(/<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["']og:video(?::url|:secure_url)?["']/i) ||
+        unescapedHtml.match(/<meta[^>]+(?:property|name)=["']twitter:player:stream["'][^>]+content=["']([^"']+)["']/i);
+      if (ogMatch && ogMatch[1]) {
+        let u = ogMatch[1];
+        if (u.startsWith('//')) u = 'https:' + u;
+        else if (u.startsWith('/')) u = baseUrl + u;
+        return rewriteBunkrUrl(u);
+      }
+
+      // 4. Look for download link or media CDN link in attributes or JS
       const mediaLinkMatch = 
         unescapedHtml.match(/href=["']([^"']*(?:media-files|get\.bunkr|cdn[0-9]*\.bunkr|storage)[^"']*)["']/i) ||
         unescapedHtml.match(/(?:src|data-src|data-url|data-download)=["']([^"']+\.(?:mp4|mkv|mov|webm|avi|jpg|jpeg|png|webp))["']/i) ||
@@ -1288,115 +1165,165 @@ Para cada álbum, você deve gerar:
         }
       }
 
-      const parsedUrl = new URL(fileUrl);
-      const isHttps = parsedUrl.protocol === 'https:';
-      const protocol = isHttps ? https : http;
+      const initialUrl = new URL(fileUrl);
+      const hostCandidates: string[] = [initialUrl.hostname];
 
-      // Determine correct referer
-      let referer = `${parsedUrl.protocol}//${parsedUrl.hostname}/`;
-      if (fileUrl.includes('bunkr')) {
-        referer = 'https://bunkr.cr/';
-      } else if (fileUrl.includes('balbums')) {
-        referer = 'https://balbums.st/';
+      // Add active fallback CDN domains for Bunkr
+      if (fileUrl.includes('bunkr') || fileUrl.includes('media-files')) {
+        const fallbacks = [
+          'media-files.bunkr.is',
+          'media-files.bunkr.site',
+          'media-files.bunkr.ws',
+          'cdn.bunkr.is',
+          'cdn.bunkr.site',
+          'get.bunkr.is',
+          'media-files.bunkr.ru',
+          'bunkr.cr'
+        ];
+        for (const fb of fallbacks) {
+          if (!hostCandidates.includes(fb)) {
+            hostCandidates.push(fb);
+          }
+        }
       }
 
-      const requestHeaders: any = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Referer': referer,
-      };
+      const candidateUrls = hostCandidates.map(host => {
+        const u = new URL(fileUrl);
+        u.hostname = host;
+        return u.toString();
+      });
 
-      if (req.headers.range) {
-        requestHeaders['Range'] = req.headers.range;
-      }
-
-      const options = {
-        hostname: parsedUrl.hostname,
-        port: parsedUrl.port || (isHttps ? 443 : 80),
-        path: parsedUrl.pathname + parsedUrl.search,
-        method: 'GET',
-        headers: requestHeaders,
-        rejectUnauthorized: false,
-      };
-
-      const proxyReq = protocol.request(options, (proxyRes) => {
-        // Handle redirect
-        if (proxyRes.statusCode && [301, 302, 303, 307, 308].includes(proxyRes.statusCode) && proxyRes.headers.location) {
-          console.log(`[Proxy Redirect] ${fileUrl} -> ${proxyRes.headers.location}`);
-          const downloadParam = req.query.download === 'true' ? '&download=true' : '';
-          const filenameParam = req.query.filename ? `&filename=${encodeURIComponent(req.query.filename as string)}` : '';
-          res.redirect(`/api/proxy-media?url=${encodeURIComponent(proxyRes.headers.location)}${downloadParam}${filenameParam}`);
+      const tryCandidate = (index: number) => {
+        if (index >= candidateUrls.length) {
+          if (!res.headersSent) {
+            res.status(500).send('Erro ao obter recurso através do proxy (todas as origens falharam).');
+          }
           return;
         }
 
-        // Check if response is HTML (indicating an unhandled view page or Cloudflare splash)
-        const contentType = proxyRes.headers['content-type'] || '';
-        if (contentType.includes('text/html') && !req.query.no_retry) {
-          let htmlBody = '';
-          proxyRes.on('data', chunk => htmlBody += chunk);
-          proxyRes.on('end', () => {
-            const resolvedUrl = extractDirectMediaUrlFromHtml(htmlBody, fileUrl);
-            if (resolvedUrl && resolvedUrl !== fileUrl) {
-              console.log(`[Proxy HTML Retry] Encontrado link direto dentro da resposta HTML: ${resolvedUrl}`);
-              const downloadParam = req.query.download === 'true' ? '&download=true' : '';
-              const filenameParam = req.query.filename ? `&filename=${encodeURIComponent(req.query.filename as string)}` : '';
-              res.redirect(`/api/proxy-media?url=${encodeURIComponent(resolvedUrl)}&no_retry=true${downloadParam}${filenameParam}`);
-            } else {
-              // Return html as fallback
-              res.setHeader('Content-Type', 'text/html; charset=utf-8');
-              res.status(200).send(htmlBody);
-            }
-          });
+        const candidateUrl = candidateUrls[index];
+        let parsedUrl: URL;
+        try {
+          parsedUrl = new URL(candidateUrl);
+        } catch (e) {
+          tryCandidate(index + 1);
           return;
         }
 
-        // Set headers for CORS and streaming
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        res.setHeader('Access-Control-Allow-Headers', 'Range, Content-Type');
-        res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Content-Length, Accept-Ranges');
+        const isHttps = parsedUrl.protocol === 'https:';
+        const protocol = isHttps ? https : http;
 
-        if (proxyRes.headers['content-type']) {
-          res.setHeader('Content-Type', proxyRes.headers['content-type']);
-        } else if (/\.(mp4|mkv|mov|webm|avi)$/i.test(parsedUrl.pathname)) {
-          res.setHeader('Content-Type', 'video/mp4');
+        let referer = `${parsedUrl.protocol}//${parsedUrl.hostname}/`;
+        if (candidateUrl.includes('bunkr')) {
+          referer = 'https://bunkr.cr/';
+        } else if (candidateUrl.includes('balbums')) {
+          referer = 'https://balbums.st/';
         }
 
-        if (proxyRes.headers['content-length']) {
-          res.setHeader('Content-Length', proxyRes.headers['content-length']);
-        }
-        if (proxyRes.headers['content-range']) {
-          res.setHeader('Content-Range', proxyRes.headers['content-range']);
-        }
-        if (proxyRes.headers['accept-ranges']) {
-          res.setHeader('Accept-Ranges', proxyRes.headers['accept-ranges']);
-        } else {
-          res.setHeader('Accept-Ranges', 'bytes');
+        const requestHeaders: any = {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Referer': referer,
+        };
+
+        if (req.headers.range) {
+          requestHeaders['Range'] = req.headers.range;
         }
 
-        const shouldDownload = req.query.download === 'true';
-        if (shouldDownload) {
-          const customFilename = req.query.filename as string || parsedUrl.pathname.split('/').pop() || 'video.mp4';
-          res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(customFilename)}"`);
-        }
+        const options = {
+          hostname: parsedUrl.hostname,
+          port: parsedUrl.port || (isHttps ? 443 : 80),
+          path: parsedUrl.pathname + parsedUrl.search,
+          method: 'GET',
+          headers: requestHeaders,
+          rejectUnauthorized: false,
+        };
 
-        res.status(proxyRes.statusCode || 200);
-        proxyRes.pipe(res);
-      });
+        const proxyReq = protocol.request(options, (proxyRes) => {
+          // Check for HTTP error status (400+, 500+)
+          if (proxyRes.statusCode && proxyRes.statusCode >= 400) {
+            console.warn(`[Proxy Candidate Failed] ${candidateUrl} respondeu com status ${proxyRes.statusCode}. Tentando próximo...`);
+            proxyRes.resume();
+            tryCandidate(index + 1);
+            return;
+          }
 
-      proxyReq.on('error', (err) => {
-        console.error('[Proxy Error]', err);
-        if (!res.headersSent) {
-          res.status(500).send('Erro ao obter recurso através do proxy.');
-        }
-      });
+          // Handle redirect
+          if (proxyRes.statusCode && [301, 302, 303, 307, 308].includes(proxyRes.statusCode) && proxyRes.headers.location) {
+            console.log(`[Proxy Redirect] ${candidateUrl} -> ${proxyRes.headers.location}`);
+            const downloadParam = req.query.download === 'true' ? '&download=true' : '';
+            const filenameParam = req.query.filename ? `&filename=${encodeURIComponent(req.query.filename as string)}` : '';
+            res.redirect(`/api/proxy-media?url=${encodeURIComponent(proxyRes.headers.location)}${downloadParam}${filenameParam}`);
+            return;
+          }
 
-      proxyReq.setTimeout(45000, () => {
-        proxyReq.destroy();
-        if (!res.headersSent) {
-          res.status(504).send('Gateway Timeout');
-        }
-      });
+          // Check if response is HTML (indicating an unhandled view page or Cloudflare splash)
+          const contentType = proxyRes.headers['content-type'] || '';
+          if (contentType.includes('text/html') && !req.query.no_retry) {
+            let htmlBody = '';
+            proxyRes.on('data', chunk => htmlBody += chunk);
+            proxyRes.on('end', () => {
+              const resolvedUrl = extractDirectMediaUrlFromHtml(htmlBody, candidateUrl);
+              if (resolvedUrl && resolvedUrl !== candidateUrl) {
+                console.log(`[Proxy HTML Retry] Encontrado link direto dentro da resposta HTML: ${resolvedUrl}`);
+                const downloadParam = req.query.download === 'true' ? '&download=true' : '';
+                const filenameParam = req.query.filename ? `&filename=${encodeURIComponent(req.query.filename as string)}` : '';
+                res.redirect(`/api/proxy-media?url=${encodeURIComponent(resolvedUrl)}&no_retry=true${downloadParam}${filenameParam}`);
+              } else {
+                tryCandidate(index + 1);
+              }
+            });
+            return;
+          }
 
-      proxyReq.end();
+          // Set headers for CORS and streaming
+          res.setHeader('Access-Control-Allow-Origin', '*');
+          res.setHeader('Access-Control-Allow-Headers', 'Range, Content-Type');
+          res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Content-Length, Accept-Ranges');
+
+          if (proxyRes.headers['content-type']) {
+            res.setHeader('Content-Type', proxyRes.headers['content-type']);
+          } else if (/\.(mp4|mkv|mov|webm|avi)$/i.test(parsedUrl.pathname)) {
+            res.setHeader('Content-Type', 'video/mp4');
+          }
+
+          if (proxyRes.headers['content-length']) {
+            res.setHeader('Content-Length', proxyRes.headers['content-length']);
+          }
+          if (proxyRes.headers['content-range']) {
+            res.setHeader('Content-Range', proxyRes.headers['content-range']);
+          }
+          if (proxyRes.headers['accept-ranges']) {
+            res.setHeader('Accept-Ranges', proxyRes.headers['accept-ranges']);
+          } else {
+            res.setHeader('Accept-Ranges', 'bytes');
+          }
+
+          const shouldDownload = req.query.download === 'true';
+          if (shouldDownload) {
+            const customFilename = req.query.filename as string || parsedUrl.pathname.split('/').pop() || 'video.mp4';
+            res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(customFilename)}"`);
+          }
+
+          res.status(proxyRes.statusCode || 200);
+          proxyRes.pipe(res);
+        });
+
+        proxyReq.on('error', (err) => {
+          console.warn(`[Proxy Candidate Error] ${candidateUrl}: ${err.message}. Tentando próximo...`);
+          tryCandidate(index + 1);
+        });
+
+        proxyReq.setTimeout(15000, () => {
+          console.warn(`[Proxy Candidate Timeout] ${candidateUrl}. Tentando próximo...`);
+          proxyReq.destroy();
+          tryCandidate(index + 1);
+        });
+
+        proxyReq.end();
+      };
+
+      tryCandidate(0);
+
     } catch (error: any) {
       console.error('[Proxy Server Error]', error);
       if (!res.headersSent) {
